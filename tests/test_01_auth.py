@@ -351,6 +351,34 @@ def run_auth_tests() -> TestResult:
     else:
         result.add_skip("Reject Access After Logout", "No token available")
 
+    # ===== Test 17: Login Member User =====
+    print_info(f"Testing member login: {TEST_MEMBER['email']}")
+    client.clear_token()
+    response = client.post("/auth/login", {
+        "email": TEST_MEMBER["email"],
+        "password": TEST_MEMBER["password"]
+    })
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            if "access_token" in data:
+                test_data.member_token = data["access_token"]
+                result.add_pass("Member Login")
+                print_info("Member token obtained")
+
+                if data.get("user", {}).get("id"):
+                    test_data.member_id = data["user"]["id"]
+                    print_info(f"Member user ID: {test_data.member_id}")
+            else:
+                result.add_fail("Member Login", "No access_token in response")
+        except Exception as e:
+            result.add_fail("Member Login", f"Error parsing response: {str(e)}")
+    elif response.status_code == 401:
+        result.add_skip("Member Login", "Member user not found - please seed database first")
+    else:
+        result.add_fail("Member Login", f"Status: {response.status_code}, Response: {response.text[:200]}")
+
     return result
 
 

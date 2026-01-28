@@ -283,7 +283,7 @@ def create_membership(
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, cashier_id, subtotal, subtotal_after_discount,
+            (transaction_code, user_id, staff_id, subtotal, subtotal_after_discount,
              tax_percentage, tax_amount, grand_total, payment_method, payment_status,
              paid_amount, paid_at, notes, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -291,7 +291,7 @@ def create_membership(
             (
                 transaction_code,
                 request.user_id,
-                auth["user_id"],  # cashier
+                auth["user_id"],  # staff
                 subtotal,
                 subtotal,
                 tax_percentage if tax_enabled else 0,

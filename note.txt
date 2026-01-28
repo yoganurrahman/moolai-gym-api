@@ -29,3 +29,35 @@ uvicorn main:app --host 0.0.0.0 --port 8181 --workers 4
 ## 6. API Documentation
 # Swagger UI: http://localhost:8181/docs
 # ReDoc: http://localhost:8181/redoc
+
+
+Rangkuman Modul Moolai Gym
+📱 MOBILE APP (Member)
+No	Menu	Fitur
+1	Auth	Register (OTP), Login, Forgot Password, PIN
+2	Profile	View/Edit profile, Membership status, QR Code
+3	Membership	Lihat paket, Beli/Perpanjang, Auto-renewal
+4	Check-in	QR Code scan, History kunjungan
+5	Class Booking	Jadwal kelas, Booking, Cancel, History
+6	Personal Training	Daftar trainer, Beli PT package, Booking jadwal
+7	Shop	Beli produk (protein, merchandise), Rental
+8	Transactions	History pembelian, Invoice/Receipt
+9	Subscriptions	Manage auto-renewal, Change payment method
+10	Notifications	Push notif (reminder, promo, billing)
+
+🖥️ CMS (Admin/Staff)
+No	Menu	Fitur
+1	Dashboard	Summary (revenue, members, visits, classes)
+2	Members	CRUD member, Freeze, Check-in manual, History
+3	Packages	CRUD membership packages (daily, monthly, dll)
+4	Classes	CRUD kelas, Jadwal, Assign trainer, Kapasitas
+5	Class Bookings	List booking, Attendance, Cancel
+6	Trainers	CRUD trainer, Jadwal, Commission
+7	PT Packages	CRUD paket PT, Assign trainer
+8	Products	CRUD produk, Inventory/Stock
+9	Transactions	List transaksi, Create manual, Refund
+10	Subscriptions	List recurring, Pause/Cancel
+11	Promos & Discounts	CRUD promo, Voucher codes
+12	Settings	Pajak, Service charge, Payment gateway
+13	Users & Roles	Staff management, Permissions
+14	Reports	Revenue, Members, Attendance, Classes

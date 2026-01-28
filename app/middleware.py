@@ -23,11 +23,47 @@ security = HTTPBearer()
 pin_security = HTTPBearer(auto_error=False)
 
 
+def get_user_permissions(user_id: int) -> List[str]:
+    """
+    Get REAL-TIME user permissions from database.
+
+    Args:
+        user_id: The user ID
+
+    Returns:
+        List of permission names for the user.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT p.name
+            FROM role_permissions rp
+            JOIN permissions p ON rp.permission_id = p.id
+            JOIN users u ON u.role_id = rp.role_id
+            WHERE u.id = %s
+            """,
+            (user_id,),
+        )
+        permissions = [row["name"] for row in cursor.fetchall()]
+        return permissions
+    except Exception as e:
+        logger.error(f"Error getting permissions for user {user_id}: {e}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def verify_bearer_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
     """
     Verify JWT Bearer token from Authorization header.
+    Permissions are fetched REAL-TIME from database, not from token.
+
     Returns user context dict with: user_id, email, role_id, role_name, permission
     """
     token = credentials.credentials
@@ -65,7 +101,12 @@ def verify_bearer_token(
 
         try:
             cursor.execute(
-                "SELECT token_version, is_active FROM users WHERE id = %s",
+                """
+                SELECT u.token_version, u.is_active, r.name as role_name
+                FROM users u
+                LEFT JOIN roles r ON u.role_id = r.id
+                WHERE u.id = %s
+                """,
                 (user_id,),
             )
             user = cursor.fetchone()
@@ -97,16 +138,22 @@ def verify_bearer_token(
                     },
                 )
 
+            # Get role_name from database (more accurate than token)
+            role_name = user["role_name"] or payload.get("role_name", "member")
+
         finally:
             cursor.close()
             conn.close()
+
+        # Get permissions REAL-TIME from database
+        permissions = get_user_permissions(user_id)
 
         return {
             "user_id": payload.get("user_id"),
             "email": payload.get("email"),
             "role_id": payload.get("role_id"),
-            "role_name": payload.get("role_name"),
-            "permission": payload.get("permission", []),
+            "role_name": role_name,
+            "permission": permissions,  # Real-time from database
             "token_version": payload.get("token_version"),
         }
 
@@ -131,16 +178,25 @@ def verify_bearer_token(
 
 def create_access_token(data: dict, expires_hours: int = ACCESS_TOKEN_EXPIRE_HOURS) -> str:
     """
-    Create JWT access token with user data.
+    Create JWT access token with minimal user data.
+    Permissions are NOT stored in token - they are checked real-time from database.
 
     Args:
-        data: dict containing user_id, email, role_id, role_name, permission, token_version
+        data: dict containing user_id, email, role_id, role_name, token_version
         expires_hours: token expiration time in hours (default 24)
 
     Returns:
         JWT token string
     """
-    to_encode = data.copy()
+    # Only include essential data in token (NOT permissions)
+    to_encode = {
+        "user_id": data.get("user_id"),
+        "email": data.get("email"),
+        "role_id": data.get("role_id"),
+        "role_name": data.get("role_name"),
+        "token_version": data.get("token_version"),
+    }
+
     expire = datetime.utcnow() + timedelta(hours=expires_hours)
     to_encode.update({
         "exp": expire,
@@ -288,6 +344,7 @@ def require_permission(permission_name: str):
     """
     Dependency to check if user has specific permission.
     Superadmin bypasses all permission checks.
+    Permissions are checked REAL-TIME from database.
 
     Usage:
         @router.get("/")
@@ -303,42 +360,18 @@ def require_permission(permission_name: str):
         if role_name.lower() == "superadmin":
             return None
 
-        # Check permission from token
+        # Check permission (already real-time from verify_bearer_token)
         user_permissions = auth.get("permission", [])
         if permission_name in user_permissions:
             return None
 
-        # Realtime check from database
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        try:
-            cursor.execute(
-                """
-                SELECT p.name
-                FROM role_permissions rp
-                JOIN permissions p ON rp.permission_id = p.id
-                JOIN users u ON u.role_id = rp.role_id
-                WHERE u.id = %s AND p.name = %s
-                """,
-                (auth["user_id"], permission_name),
-            )
-            result = cursor.fetchone()
-
-            if not result:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error_code": "PERMISSION_DENIED",
-                        "message": f"Anda tidak memiliki akses untuk operasi ini",
-                    },
-                )
-
-        finally:
-            cursor.close()
-            conn.close()
-
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "PERMISSION_DENIED",
+                "message": f"Anda tidak memiliki akses untuk operasi ini",
+            },
+        )
 
     return permission_checker
 
@@ -346,6 +379,7 @@ def require_permission(permission_name: str):
 def require_any_permission(*permission_names: str):
     """
     Dependency to check if user has ANY of the specified permissions (OR logic).
+    Permissions are checked REAL-TIME from database.
 
     Usage:
         @router.get("/")
@@ -361,45 +395,19 @@ def require_any_permission(*permission_names: str):
         if role_name.lower() == "superadmin":
             return None
 
-        # Check permission from token
+        # Check permission (already real-time from verify_bearer_token)
         user_permissions = auth.get("permission", [])
         for perm in permission_names:
             if perm in user_permissions:
                 return None
 
-        # Realtime check from database
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        try:
-            placeholders = ", ".join(["%s"] * len(permission_names))
-            cursor.execute(
-                f"""
-                SELECT p.name
-                FROM role_permissions rp
-                JOIN permissions p ON rp.permission_id = p.id
-                JOIN users u ON u.role_id = rp.role_id
-                WHERE u.id = %s AND p.name IN ({placeholders})
-                LIMIT 1
-                """,
-                (auth["user_id"], *permission_names),
-            )
-            result = cursor.fetchone()
-
-            if not result:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error_code": "PERMISSION_DENIED",
-                        "message": f"Anda tidak memiliki akses untuk operasi ini",
-                    },
-                )
-
-        finally:
-            cursor.close()
-            conn.close()
-
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "PERMISSION_DENIED",
+                "message": f"Anda tidak memiliki akses untuk operasi ini",
+            },
+        )
 
     return permission_checker
 
@@ -407,6 +415,7 @@ def require_any_permission(*permission_names: str):
 def require_all_permissions(*permission_names: str):
     """
     Dependency to check if user has ALL of the specified permissions (AND logic).
+    Permissions are checked REAL-TIME from database.
 
     Usage:
         @router.get("/")
@@ -422,44 +431,19 @@ def require_all_permissions(*permission_names: str):
         if role_name.lower() == "superadmin":
             return None
 
-        # Check permission from token
+        # Check permission (already real-time from verify_bearer_token)
         user_permissions = auth.get("permission", [])
         has_all = all(perm in user_permissions for perm in permission_names)
         if has_all:
             return None
 
-        # Realtime check from database
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        try:
-            placeholders = ", ".join(["%s"] * len(permission_names))
-            cursor.execute(
-                f"""
-                SELECT COUNT(DISTINCT p.name) as count
-                FROM role_permissions rp
-                JOIN permissions p ON rp.permission_id = p.id
-                JOIN users u ON u.role_id = rp.role_id
-                WHERE u.id = %s AND p.name IN ({placeholders})
-                """,
-                (auth["user_id"], *permission_names),
-            )
-            result = cursor.fetchone()
-
-            if not result or result["count"] != len(permission_names):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error_code": "PERMISSION_DENIED",
-                        "message": f"Anda tidak memiliki akses untuk operasi ini",
-                    },
-                )
-
-        finally:
-            cursor.close()
-            conn.close()
-
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "PERMISSION_DENIED",
+                "message": f"Anda tidak memiliki akses untuk operasi ini",
+            },
+        )
 
     return permission_checker
 
@@ -468,6 +452,7 @@ def check_permission(auth: dict, permission_name: str) -> None:
     """
     Check if user has specific permission. Raises HTTPException if not.
     Superadmin bypasses all permission checks.
+    Permissions are already REAL-TIME from auth context.
 
     Usage:
         @router.get("/")
@@ -481,39 +466,15 @@ def check_permission(auth: dict, permission_name: str) -> None:
     if role_name.lower() == "superadmin":
         return None
 
-    # Check permission from token
+    # Check permission (already real-time from verify_bearer_token)
     user_permissions = auth.get("permission", [])
     if permission_name in user_permissions:
         return None
 
-    # Realtime check from database
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        cursor.execute(
-            """
-            SELECT p.name
-            FROM role_permissions rp
-            JOIN permissions p ON rp.permission_id = p.id
-            JOIN users u ON u.role_id = rp.role_id
-            WHERE u.id = %s AND p.name = %s
-            """,
-            (auth["user_id"], permission_name),
-        )
-        result = cursor.fetchone()
-
-        if not result:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error_code": "PERMISSION_DENIED",
-                    "message": f"Anda tidak memiliki akses untuk operasi ini",
-                },
-            )
-
-    finally:
-        cursor.close()
-        conn.close()
-
-    return None
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error_code": "PERMISSION_DENIED",
+            "message": f"Anda tidak memiliki akses untuk operasi ini",
+        },
+    )

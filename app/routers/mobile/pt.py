@@ -76,7 +76,7 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
             """
             SELECT mps.*, pp.name as package_name
             FROM member_pt_sessions mps
-            JOIN pt_packages pp ON mps.package_id = pp.id
+            JOIN pt_packages pp ON mps.pt_package_id = pp.id
             WHERE mps.user_id = %s AND mps.status = 'active'
             ORDER BY mps.expire_date ASC
             """,
@@ -125,7 +125,7 @@ def get_available_trainers(
         cursor.execute(
             f"""
             SELECT t.id, t.specialization, t.bio,
-                   u.name, u.email, u.phone, u.profile_photo
+                   u.name, u.email, u.phone, u.avatar as profile_photo
             FROM trainers t
             JOIN users u ON t.user_id = u.id
             WHERE {where_clause}

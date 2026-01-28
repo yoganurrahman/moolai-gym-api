@@ -341,18 +341,6 @@ def login(request: LoginRequest):
                     },
                 )
 
-        # Get user permissions
-        cursor.execute(
-            """
-            SELECT p.name
-            FROM role_permissions rp
-            JOIN permissions p ON rp.permission_id = p.id
-            WHERE rp.role_id = %s
-            """,
-            (user["role_id"],),
-        )
-        permissions = [row["name"] for row in cursor.fetchall()]
-
         # Reset failed attempts and update token version
         new_token_version = (user["token_version"] or 0) + 1
         cursor.execute(
@@ -365,13 +353,12 @@ def login(request: LoginRequest):
         )
         conn.commit()
 
-        # Create access token
+        # Create access token (permissions NOT stored in token - fetched real-time)
         token_data = {
             "user_id": user["id"],
             "email": user["email"],
             "role_id": user["role_id"],
             "role_name": user["role_name"] or "member",
-            "permission": permissions,
             "token_version": new_token_version,
         }
         access_token = create_access_token(token_data)

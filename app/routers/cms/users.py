@@ -282,7 +282,7 @@ def update_user(
 
     try:
         # Check if user exists
-        cursor.execute("SELECT id, role_id FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = %s", (user_id,))
+        cursor.execute("SELECT u.id, u.role_id FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = %s", (user_id,))
         user = cursor.fetchone()
 
         if not user:

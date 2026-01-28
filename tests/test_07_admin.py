@@ -61,9 +61,9 @@ def run_admin_tests() -> TestResult:
     new_user_email = f"newuser_{datetime.now().strftime('%H%M%S')}@test.com"
     response = client.post("/api/cms/users", {
         "email": new_user_email,
+        "password": "TestPass123!",
         "phone": f"08{datetime.now().strftime('%H%M%S%f')[:10]}",
         "name": "Test New User",
-        "gender": "female",
         "role_id": 3,  # Member role
         "is_active": True
     })

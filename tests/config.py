@@ -6,34 +6,46 @@ import os
 # Base URL for API
 BASE_URL = os.getenv("TEST_API_URL", "http://localhost:8181")
 
-# Test user credentials
+# Test user credentials - all passwords are 'admin123'
+TEST_SUPERADMIN = {
+    "email": "superadmin@moolaigym.com",
+    "password": "admin123",
+}
+
 TEST_ADMIN = {
     "email": "admin@moolaigym.com",
     "password": "admin123",
-    "phone": "081234567890"
+    "phone": "081234567891"
 }
 
 TEST_STAFF = {
     "email": "staff@moolaigym.com",
-    "password": "staff123",
-    "phone": "081234567891"
+    "password": "admin123",
+    "phone": "081234567892"
 }
 
 TEST_MEMBER = {
-    "email": "member@test.com",
-    "password": "member123",
-    "phone": "081234567892",
-    "name": "Test Member",
+    "email": "member@moolaigym.com",
+    "password": "admin123",
+    "phone": "081234567893",
+    "name": "Member User",
     "gender": "male",
     "birth_date": "1990-01-15"
 }
 
+TEST_TRAINER = {
+    "email": "trainer@moolaigym.com",
+    "password": "admin123",
+}
+
 # Test data IDs (will be populated during tests)
 class TestData:
+    superadmin_token: str = None
     admin_token: str = None
     staff_token: str = None
     member_token: str = None
-    member_id: int = None
+    trainer_token: str = None
+    member_id: int = 4  # member@moolaigym.com has id=4
     membership_id: int = None
     package_id: int = None
     product_id: int = None
