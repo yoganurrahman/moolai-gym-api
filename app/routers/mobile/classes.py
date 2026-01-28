@@ -1,0 +1,501 @@
+"""
+Mobile Classes Router - Class schedules and booking for members
+"""
+import logging
+from datetime import datetime, date, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, status, Depends, Query
+from pydantic import BaseModel
+
+from app.db import get_db_connection
+from app.middleware import verify_bearer_token
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/classes", tags=["Mobile - Classes"])
+
+
+# ============== Request Models ==============
+
+class BookClassRequest(BaseModel):
+    schedule_id: int
+    class_date: date
+
+
+# ============== Endpoints ==============
+
+@router.get("/types")
+def get_class_types(auth: dict = Depends(verify_bearer_token)):
+    """Get all available class types"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT id, name, description, default_duration, color
+            FROM class_types
+            WHERE is_active = 1
+            ORDER BY name ASC
+            """
+        )
+        class_types = cursor.fetchall()
+
+        return {
+            "success": True,
+            "data": class_types,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting class types: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_CLASS_TYPES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/schedules")
+def get_class_schedules(
+    class_type_id: Optional[int] = Query(None),
+    date_from: date = Query(default_factory=date.today),
+    date_to: Optional[date] = Query(None),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get class schedules with availability info"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Default to 7 days range
+        if not date_to:
+            date_to = date_from + timedelta(days=7)
+
+        where_clauses = ["cs.is_active = 1"]
+        params = []
+
+        if class_type_id:
+            where_clauses.append("cs.class_type_id = %s")
+            params.append(class_type_id)
+
+        where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        cursor.execute(
+            f"""
+            SELECT cs.*,
+                   ct.name as class_name, ct.description as class_description, ct.color,
+                   u.name as trainer_name
+            FROM class_schedules cs
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            LEFT JOIN trainers t ON cs.trainer_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            {where_sql}
+            ORDER BY cs.day_of_week ASC, cs.start_time ASC
+            """,
+            params,
+        )
+        schedules = cursor.fetchall()
+
+        # Build schedule list with dates
+        result = []
+        current_date = date_from
+        while current_date <= date_to:
+            day_of_week = current_date.weekday()
+            # Convert to Sunday=0 format
+            day_of_week_sunday = (day_of_week + 1) % 7
+
+            for schedule in schedules:
+                if schedule["day_of_week"] == day_of_week_sunday:
+                    # Get booking count for this date
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) as booked
+                        FROM class_bookings
+                        WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended')
+                        """,
+                        (schedule["id"], current_date),
+                    )
+                    booked = cursor.fetchone()["booked"]
+
+                    # Check if user already booked
+                    cursor.execute(
+                        """
+                        SELECT id FROM class_bookings
+                        WHERE user_id = %s AND schedule_id = %s AND class_date = %s AND status != 'cancelled'
+                        """,
+                        (auth["user_id"], schedule["id"], current_date),
+                    )
+                    user_booking = cursor.fetchone()
+
+                    schedule_copy = {
+                        "id": schedule["id"],
+                        "class_type_id": schedule["class_type_id"],
+                        "class_name": schedule["class_name"],
+                        "class_description": schedule["class_description"],
+                        "color": schedule["color"],
+                        "trainer_name": schedule["trainer_name"],
+                        "start_time": str(schedule["start_time"]),
+                        "end_time": str(schedule["end_time"]),
+                        "room": schedule["room"],
+                        "capacity": schedule["capacity"],
+                        "class_date": str(current_date),
+                        "booked_count": booked,
+                        "available_slots": schedule["capacity"] - booked,
+                        "is_full": booked >= schedule["capacity"],
+                        "is_booked": user_booking is not None,
+                        "booking_id": user_booking["id"] if user_booking else None,
+                    }
+                    result.append(schedule_copy)
+
+            current_date += timedelta(days=1)
+
+        return {
+            "success": True,
+            "data": result,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting schedules: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_SCHEDULES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/book")
+def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_token)):
+    """Book a class"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        user_id = auth["user_id"]
+
+        # Get schedule
+        cursor.execute(
+            """
+            SELECT cs.*, ct.name as class_name
+            FROM class_schedules cs
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cs.id = %s AND cs.is_active = 1
+            """,
+            (request.schedule_id,),
+        )
+        schedule = cursor.fetchone()
+
+        if not schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "SCHEDULE_NOT_FOUND", "message": "Jadwal kelas tidak ditemukan"},
+            )
+
+        # Validate date is correct day of week
+        day_of_week_sunday = (request.class_date.weekday() + 1) % 7
+        if day_of_week_sunday != schedule["day_of_week"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "INVALID_DATE", "message": "Tanggal tidak sesuai dengan jadwal kelas"},
+            )
+
+        # Check if date is not in the past
+        if request.class_date < date.today():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "PAST_DATE", "message": "Tidak bisa booking kelas yang sudah lewat"},
+            )
+
+        # Get booking advance days setting
+        cursor.execute("SELECT value FROM settings WHERE `key` = 'class_booking_advance_days'")
+        setting = cursor.fetchone()
+        max_advance_days = int(setting["value"]) if setting else 7
+
+        if request.class_date > date.today() + timedelta(days=max_advance_days):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "TOO_FAR_ADVANCE",
+                    "message": f"Booking maksimal H-{max_advance_days}",
+                },
+            )
+
+        # Check if already booked
+        cursor.execute(
+            """
+            SELECT id FROM class_bookings
+            WHERE user_id = %s AND schedule_id = %s AND class_date = %s AND status != 'cancelled'
+            """,
+            (user_id, request.schedule_id, request.class_date),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "ALREADY_BOOKED", "message": "Anda sudah booking kelas ini"},
+            )
+
+        # Check capacity
+        cursor.execute(
+            """
+            SELECT COUNT(*) as booked FROM class_bookings
+            WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended')
+            """,
+            (request.schedule_id, request.class_date),
+        )
+        booked_count = cursor.fetchone()["booked"]
+
+        if booked_count >= schedule["capacity"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "CLASS_FULL", "message": "Kelas sudah penuh"},
+            )
+
+        # Check membership/class pass
+        cursor.execute(
+            """
+            SELECT mm.*, mp.include_classes, mp.class_quota
+            FROM member_memberships mm
+            JOIN membership_packages mp ON mm.package_id = mp.id
+            WHERE mm.user_id = %s AND mm.status = 'active'
+            ORDER BY mm.created_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        membership = cursor.fetchone()
+
+        has_class_access = False
+
+        if membership and membership["include_classes"]:
+            # Check if has quota or unlimited
+            if membership["class_remaining"] is None or membership["class_remaining"] > 0:
+                has_class_access = True
+                # Deduct class quota if not unlimited
+                if membership["class_remaining"] is not None:
+                    cursor.execute(
+                        "UPDATE member_memberships SET class_remaining = class_remaining - 1 WHERE id = %s",
+                        (membership["id"],),
+                    )
+
+        if not has_class_access:
+            # Check class pass
+            cursor.execute(
+                """
+                SELECT * FROM member_class_passes
+                WHERE user_id = %s AND status = 'active' AND remaining_classes > 0
+                ORDER BY expire_date ASC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            class_pass = cursor.fetchone()
+
+            if class_pass:
+                has_class_access = True
+                cursor.execute(
+                    "UPDATE member_class_passes SET used_classes = used_classes + 1, remaining_classes = remaining_classes - 1 WHERE id = %s",
+                    (class_pass["id"],),
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "NO_CLASS_ACCESS",
+                        "message": "Anda tidak memiliki akses kelas. Silakan beli class pass atau upgrade membership.",
+                    },
+                )
+
+        # Create booking
+        cursor.execute(
+            """
+            INSERT INTO class_bookings
+            (user_id, schedule_id, class_date, status, booked_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (user_id, request.schedule_id, request.class_date, "booked", datetime.now(), datetime.now()),
+        )
+        booking_id = cursor.lastrowid
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Booking berhasil",
+            "data": {
+                "booking_id": booking_id,
+                "class_name": schedule["class_name"],
+                "class_date": str(request.class_date),
+                "start_time": str(schedule["start_time"]),
+                "room": schedule["room"],
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error booking class: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "BOOK_CLASS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/book/{booking_id}")
+def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Cancel a class booking"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        user_id = auth["user_id"]
+
+        # Get booking
+        cursor.execute(
+            """
+            SELECT cb.*, cs.start_time
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cb.id = %s AND cb.user_id = %s AND cb.status = 'booked'
+            """,
+            (booking_id, user_id),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        # Check cancel window
+        cursor.execute("SELECT value FROM settings WHERE `key` = 'class_cancel_hours'")
+        setting = cursor.fetchone()
+        cancel_hours = int(setting["value"]) if setting else 2
+
+        class_datetime = datetime.combine(booking["class_date"], booking["start_time"])
+        if datetime.now() > class_datetime - timedelta(hours=cancel_hours):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CANCEL_TOO_LATE",
+                    "message": f"Pembatalan harus dilakukan minimal {cancel_hours} jam sebelum kelas",
+                },
+            )
+
+        # Cancel booking
+        cursor.execute(
+            """
+            UPDATE class_bookings
+            SET status = 'cancelled', cancelled_at = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), datetime.now(), booking_id),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Booking berhasil dibatalkan",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error cancelling booking: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "CANCEL_BOOKING_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/my-bookings")
+def get_my_bookings(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    upcoming_only: bool = Query(True),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get my class bookings"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        user_id = auth["user_id"]
+
+        where_clauses = ["cb.user_id = %s"]
+        params = [user_id]
+
+        if status_filter:
+            where_clauses.append("cb.status = %s")
+            params.append(status_filter)
+
+        if upcoming_only:
+            where_clauses.append("cb.class_date >= %s")
+            params.append(date.today())
+
+        where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        # Count total
+        cursor.execute(
+            f"SELECT COUNT(*) as total FROM class_bookings cb{where_sql}", params
+        )
+        total = cursor.fetchone()["total"]
+
+        # Get data
+        offset = (page - 1) * limit
+        cursor.execute(
+            f"""
+            SELECT cb.*, cs.start_time, cs.end_time, cs.room,
+                   ct.name as class_name, ct.color,
+                   u.name as trainer_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            LEFT JOIN trainers t ON cs.trainer_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            {where_sql}
+            ORDER BY cb.class_date ASC, cs.start_time ASC
+            LIMIT %s OFFSET %s
+            """,
+            params + [limit, offset],
+        )
+        bookings = cursor.fetchall()
+
+        # Format times
+        for b in bookings:
+            b["start_time"] = str(b["start_time"])
+            b["end_time"] = str(b["end_time"])
+
+        return {
+            "success": True,
+            "data": bookings,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "total_pages": (total + limit - 1) // limit,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting bookings: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_BOOKINGS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()

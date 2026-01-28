@@ -462,3 +462,58 @@ def require_all_permissions(*permission_names: str):
         return None
 
     return permission_checker
+
+
+def check_permission(auth: dict, permission_name: str) -> None:
+    """
+    Check if user has specific permission. Raises HTTPException if not.
+    Superadmin bypasses all permission checks.
+
+    Usage:
+        @router.get("/")
+        def list_items(auth: dict = Depends(verify_bearer_token)):
+            check_permission(auth, "item.view")
+            # ... rest of the code
+    """
+    role_name = auth.get("role_name", "")
+
+    # Superadmin bypass
+    if role_name.lower() == "superadmin":
+        return None
+
+    # Check permission from token
+    user_permissions = auth.get("permission", [])
+    if permission_name in user_permissions:
+        return None
+
+    # Realtime check from database
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT p.name
+            FROM role_permissions rp
+            JOIN permissions p ON rp.permission_id = p.id
+            JOIN users u ON u.role_id = rp.role_id
+            WHERE u.id = %s AND p.name = %s
+            """,
+            (auth["user_id"], permission_name),
+        )
+        result = cursor.fetchone()
+
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "PERMISSION_DENIED",
+                    "message": f"Anda tidak memiliki akses untuk operasi ini",
+                },
+            )
+
+    finally:
+        cursor.close()
+        conn.close()
+
+    return None
