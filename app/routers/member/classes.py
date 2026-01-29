@@ -2,11 +2,12 @@
 Member Classes Router - Class schedules and booking for members
 """
 import logging
+import uuid
 from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
 from app.middleware import verify_bearer_token, get_branch_id, require_branch_id
@@ -21,6 +22,17 @@ router = APIRouter(prefix="/classes", tags=["Member - Classes"])
 class BookClassRequest(BaseModel):
     schedule_id: int
     class_date: date
+
+
+class PurchaseClassPassRequest(BaseModel):
+    class_package_id: int
+    payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
+
+
+# ============== Helper Functions ==============
+
+def _generate_transaction_code():
+    return f"TRX-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
 
 
 # ============== Endpoints ==============
@@ -395,7 +407,10 @@ def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
         setting = cursor.fetchone()
         cancel_hours = int(setting["value"]) if setting else 2
 
-        class_datetime = datetime.combine(booking["class_date"], booking["start_time"])
+        start_time = booking["start_time"]
+        if isinstance(start_time, timedelta):
+            start_time = (datetime.min + start_time).time()
+        class_datetime = datetime.combine(booking["class_date"], start_time)
         if datetime.now() > class_datetime - timedelta(hours=cancel_hours):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -480,9 +495,11 @@ def get_my_bookings(
         where_clauses = ["cb.user_id = %s"]
         params = [user_id]
 
-        if status_filter:
+        if status_filter and status_filter != "all":
             where_clauses.append("cb.status = %s")
             params.append(status_filter)
+        elif not status_filter:
+            where_clauses.append("cb.status = 'booked'")
 
         if upcoming_only:
             where_clauses.append("cb.class_date >= %s")
@@ -539,6 +556,179 @@ def get_my_bookings(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "GET_BOOKINGS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/packages")
+def get_class_packages(auth: dict = Depends(verify_bearer_token)):
+    """Get available class packages for purchase"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT id, name, description, class_count, price, valid_days, class_type_id
+            FROM class_packages
+            WHERE is_active = 1
+            ORDER BY price ASC
+            """
+        )
+        packages = cursor.fetchall()
+
+        for p in packages:
+            p["price"] = float(p["price"]) if p.get("price") else 0
+
+        return {
+            "success": True,
+            "data": packages,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting class packages: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_CLASS_PACKAGES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/packages/purchase")
+def purchase_class_pass(
+    request: PurchaseClassPassRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Purchase a class pass"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Validate package
+        cursor.execute(
+            "SELECT * FROM class_packages WHERE id = %s AND is_active = 1",
+            (request.class_package_id,),
+        )
+        package = cursor.fetchone()
+
+        if not package:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket kelas tidak ditemukan"},
+            )
+
+        # Get tax settings
+        cursor.execute("SELECT `key`, `value` FROM settings WHERE `key` IN ('tax_enabled', 'tax_percentage')")
+        settings = {row["key"]: row["value"] for row in cursor.fetchall()}
+        tax_enabled = settings.get("tax_enabled", "false") == "true"
+        tax_percentage = float(settings.get("tax_percentage", "0"))
+
+        # Calculate pricing
+        subtotal = float(package["price"])
+        tax_amount = subtotal * (tax_percentage / 100) if tax_enabled else 0
+        grand_total = subtotal + tax_amount
+
+        # Create transaction
+        transaction_code = _generate_transaction_code()
+        cursor.execute(
+            """
+            INSERT INTO transactions
+            (transaction_code, user_id, branch_id, subtotal, subtotal_after_discount,
+             tax_percentage, tax_amount, grand_total, payment_method, payment_status,
+             paid_amount, paid_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_code,
+                auth["user_id"],
+                branch_id,
+                subtotal,
+                subtotal,
+                tax_percentage if tax_enabled else 0,
+                tax_amount,
+                grand_total,
+                request.payment_method,
+                "paid",
+                grand_total,
+                datetime.now(),
+                datetime.now(),
+            ),
+        )
+        transaction_id = cursor.lastrowid
+
+        # Create transaction item
+        cursor.execute(
+            """
+            INSERT INTO transaction_items
+            (transaction_id, item_type, item_id, item_name, quantity, unit_price, subtotal, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_id,
+                "class_pass",
+                package["id"],
+                package["name"],
+                1,
+                subtotal,
+                subtotal,
+                datetime.now(),
+            ),
+        )
+
+        # Create member class pass
+        start_date = date.today()
+        expire_date = start_date + timedelta(days=package["valid_days"])
+
+        cursor.execute(
+            """
+            INSERT INTO member_class_passes
+            (user_id, class_package_id, transaction_id,
+             total_classes, used_classes, start_date, expire_date, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                auth["user_id"],
+                package["id"],
+                transaction_id,
+                package["class_count"],
+                0,
+                start_date,
+                expire_date,
+                "active",
+                datetime.now(),
+            ),
+        )
+        class_pass_id = cursor.lastrowid
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Class pass berhasil dibeli",
+            "data": {
+                "class_pass_id": class_pass_id,
+                "transaction_id": transaction_id,
+                "transaction_code": transaction_code,
+                "package_name": package["name"],
+                "total_classes": package["class_count"],
+                "expire_date": str(expire_date),
+                "total_paid": grand_total,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error purchasing class pass: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "CLASS_PASS_PURCHASE_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

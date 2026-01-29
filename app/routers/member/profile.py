@@ -23,9 +23,7 @@ class UpdateProfileRequest(BaseModel):
     phone: Optional[str] = Field(None, pattern=r"^[0-9+\-\s]{8,15}$")
     address: Optional[str] = None
     birth_date: Optional[str] = None
-    gender: Optional[str] = Field(None, pattern=r"^(male|female|other)$")
-    emergency_contact_name: Optional[str] = None
-    emergency_contact_phone: Optional[str] = None
+    gender: Optional[str] = Field(None, pattern=r"^(male|female)$")
 
 
 class SetDefaultBranchRequest(BaseModel):
@@ -43,9 +41,8 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             """
-            SELECT u.id, u.email, u.name, u.phone, u.address, u.birth_date, u.gender,
-                   u.emergency_contact_name, u.emergency_contact_phone, u.profile_photo,
-                   u.email_verified, u.has_pin, u.default_branch_id, u.created_at,
+            SELECT u.id, u.email, u.name, u.phone, u.address, u.date_of_birth, u.gender,
+                   u.avatar, u.has_pin, u.default_branch_id, u.created_at,
                    b.code as default_branch_code, b.name as default_branch_name
             FROM users u
             LEFT JOIN branches b ON u.default_branch_id = b.id
@@ -61,7 +58,6 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
                 detail={"error_code": "USER_NOT_FOUND", "message": "User tidak ditemukan"},
             )
 
-        user["email_verified"] = bool(user.get("email_verified"))
         user["has_pin"] = bool(user.get("has_pin"))
 
         # Build default branch info
@@ -134,17 +130,11 @@ def update_my_profile(request: UpdateProfileRequest, auth: dict = Depends(verify
             update_fields.append("address = %s")
             params.append(request.address)
         if request.birth_date is not None:
-            update_fields.append("birth_date = %s")
+            update_fields.append("date_of_birth = %s")
             params.append(request.birth_date)
         if request.gender is not None:
             update_fields.append("gender = %s")
             params.append(request.gender)
-        if request.emergency_contact_name is not None:
-            update_fields.append("emergency_contact_name = %s")
-            params.append(request.emergency_contact_name)
-        if request.emergency_contact_phone is not None:
-            update_fields.append("emergency_contact_phone = %s")
-            params.append(request.emergency_contact_phone)
 
         if not update_fields:
             return {"success": True, "message": "Tidak ada perubahan"}

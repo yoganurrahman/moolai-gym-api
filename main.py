@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 # Get settings from environment
 APP_NAME = os.getenv("APP_NAME", "Moolai Gym API")
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
 
 app = FastAPI(
     title=APP_NAME,
@@ -50,6 +50,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

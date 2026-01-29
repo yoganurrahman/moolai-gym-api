@@ -438,7 +438,10 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
         setting = cursor.fetchone()
         cancel_hours = int(setting["value"]) if setting else 24
 
-        booking_datetime = datetime.combine(booking["booking_date"], booking["start_time"])
+        start_time = booking["start_time"]
+        if isinstance(start_time, timedelta):
+            start_time = (datetime.min + start_time).time()
+        booking_datetime = datetime.combine(booking["booking_date"], start_time)
         if datetime.now() > booking_datetime - timedelta(hours=cancel_hours):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -93,16 +93,37 @@ def scan_checkin(branch_id: int = Depends(require_branch_id), auth: dict = Depen
                     },
                 )
 
+        # Check if already checked in (no checkout yet)
+        cursor.execute(
+            """
+            SELECT * FROM member_checkins
+            WHERE user_id = %s AND checkout_time IS NULL
+            ORDER BY checkin_time DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        open_checkin = cursor.fetchone()
+
+        if open_checkin:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "ALREADY_CHECKED_IN",
+                    "message": "Anda sudah check-in. Silakan check-out terlebih dahulu.",
+                },
+            )
+
         # Get cooldown setting
         cursor.execute("SELECT value FROM settings WHERE `key` = 'checkin_cooldown_minutes'")
         setting = cursor.fetchone()
         cooldown_minutes = int(setting["value"]) if setting else 60
 
-        # Check if already checked in within cooldown period
+        # Check cooldown period
         cursor.execute(
             """
             SELECT * FROM member_checkins
-            WHERE user_id = %s AND checkin_time > %s
+            WHERE user_id = %s AND checkout_time IS NOT NULL AND checkout_time <= NOW() AND checkin_time > %s
             ORDER BY checkin_time DESC
             LIMIT 1
             """,
@@ -111,26 +132,16 @@ def scan_checkin(branch_id: int = Depends(require_branch_id), auth: dict = Depen
         recent_checkin = cursor.fetchone()
 
         if recent_checkin:
-            # Check if not checked out
-            if not recent_checkin["checkout_time"]:
+            next_checkin_time = recent_checkin["checkout_time"] + timedelta(minutes=cooldown_minutes)
+            if datetime.now() < next_checkin_time:
+                remaining_minutes = int((next_checkin_time - datetime.now()).total_seconds() / 60)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
-                        "error_code": "ALREADY_CHECKED_IN",
-                        "message": "Anda sudah check-in. Silakan check-out terlebih dahulu.",
+                        "error_code": "CHECKIN_COOLDOWN",
+                        "message": f"Anda baru saja check-in. Coba lagi dalam {remaining_minutes} menit.",
                     },
                 )
-
-            # Within cooldown
-            next_checkin_time = recent_checkin["checkin_time"] + timedelta(minutes=cooldown_minutes)
-            remaining_minutes = int((next_checkin_time - datetime.now()).total_seconds() / 60)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "CHECKIN_COOLDOWN",
-                    "message": f"Anda baru saja check-in. Coba lagi dalam {remaining_minutes} menit.",
-                },
-            )
 
         # Create check-in
         cursor.execute(

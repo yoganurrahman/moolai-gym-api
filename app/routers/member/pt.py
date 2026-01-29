@@ -1,6 +1,7 @@
 """
 Member PT Router - Personal Training for members
 """
+import json
 import logging
 import uuid
 from datetime import datetime, date, timedelta
@@ -27,6 +28,18 @@ class BookPTRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class PurchasePTRequest(BaseModel):
+    package_id: int
+    trainer_id: int
+    payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
+
+
+# ============== Helper Functions ==============
+
+def _generate_transaction_code():
+    return f"TRX-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+
+
 # ============== Endpoints ==============
 
 @router.get("/packages")
@@ -38,10 +51,10 @@ def get_pt_packages(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             """
-            SELECT id, name, description, sessions, price, validity_days
+            SELECT id, name, description, session_count, price, valid_days
             FROM pt_packages
             WHERE is_active = 1
-            ORDER BY sort_order ASC, price ASC
+            ORDER BY price ASC
             """
         )
         packages = cursor.fetchall()
@@ -327,7 +340,7 @@ def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_bra
         cursor.execute(
             """
             INSERT INTO pt_bookings
-            (branch_id, pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, notes, created_at)
+            (branch_id, member_pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, notes, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -349,7 +362,7 @@ def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_bra
         cursor.execute(
             """
             UPDATE member_pt_sessions
-            SET remaining_sessions = remaining_sessions - 1, used_sessions = used_sessions + 1, updated_at = %s
+            SET used_sessions = used_sessions + 1, updated_at = %s
             WHERE id = %s
             """,
             (datetime.now(), request.pt_session_id),
@@ -399,9 +412,11 @@ def get_my_pt_bookings(
         where_clauses = ["pb.user_id = %s"]
         params = [auth["user_id"]]
 
-        if status_filter:
+        if status_filter and status_filter != "all":
             where_clauses.append("pb.status = %s")
             params.append(status_filter)
+        elif not status_filter:
+            where_clauses.append("pb.status = 'booked'")
 
         if upcoming_only:
             where_clauses.append("pb.booking_date >= %s")
@@ -481,7 +496,10 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
             )
 
         # Check cancel window (24 hours before)
-        booking_datetime = datetime.combine(booking["booking_date"], booking["start_time"])
+        start_time = booking["start_time"]
+        if isinstance(start_time, timedelta):
+            start_time = (datetime.min + start_time).time()
+        booking_datetime = datetime.combine(booking["booking_date"], start_time)
         if datetime.now() > booking_datetime - timedelta(hours=24):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -498,10 +516,10 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
         cursor.execute(
             """
             UPDATE member_pt_sessions
-            SET remaining_sessions = remaining_sessions + 1, used_sessions = used_sessions - 1, updated_at = %s
+            SET used_sessions = used_sessions - 1, updated_at = %s
             WHERE id = %s
             """,
-            (datetime.now(), booking["pt_session_id"]),
+            (datetime.now(), booking["member_pt_session_id"]),
         )
 
         conn.commit()
@@ -519,6 +537,165 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "CANCEL_PT_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/purchase")
+def purchase_pt_package(
+    request: PurchasePTRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Purchase a PT package"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Validate package
+        cursor.execute(
+            "SELECT * FROM pt_packages WHERE id = %s AND is_active = 1",
+            (request.package_id,),
+        )
+        package = cursor.fetchone()
+
+        if not package:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket PT tidak ditemukan"},
+            )
+
+        # Validate trainer
+        cursor.execute(
+            "SELECT * FROM trainers WHERE id = %s AND is_active = 1",
+            (request.trainer_id,),
+        )
+        trainer = cursor.fetchone()
+
+        if not trainer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "TRAINER_NOT_FOUND", "message": "Trainer tidak ditemukan"},
+            )
+
+        # If package is for specific trainer, validate match
+        if package.get("trainer_id") and package["trainer_id"] != request.trainer_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "TRAINER_MISMATCH", "message": "Paket ini hanya untuk trainer tertentu"},
+            )
+
+        # Get tax settings
+        cursor.execute("SELECT `key`, `value` FROM settings WHERE `key` IN ('tax_enabled', 'tax_percentage')")
+        settings = {row["key"]: row["value"] for row in cursor.fetchall()}
+        tax_enabled = settings.get("tax_enabled", "false") == "true"
+        tax_percentage = float(settings.get("tax_percentage", "0"))
+
+        # Calculate pricing
+        subtotal = float(package["price"])
+        tax_amount = subtotal * (tax_percentage / 100) if tax_enabled else 0
+        grand_total = subtotal + tax_amount
+
+        # Create transaction
+        transaction_code = _generate_transaction_code()
+        cursor.execute(
+            """
+            INSERT INTO transactions
+            (transaction_code, user_id, branch_id, subtotal, subtotal_after_discount,
+             tax_percentage, tax_amount, grand_total, payment_method, payment_status,
+             paid_amount, paid_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_code,
+                auth["user_id"],
+                branch_id,
+                subtotal,
+                subtotal,
+                tax_percentage if tax_enabled else 0,
+                tax_amount,
+                grand_total,
+                request.payment_method,
+                "paid",
+                grand_total,
+                datetime.now(),
+                datetime.now(),
+            ),
+        )
+        transaction_id = cursor.lastrowid
+
+        # Create transaction item
+        cursor.execute(
+            """
+            INSERT INTO transaction_items
+            (transaction_id, item_type, item_id, item_name, quantity, unit_price, subtotal, metadata, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_id,
+                "pt_package",
+                package["id"],
+                package["name"],
+                1,
+                subtotal,
+                subtotal,
+                json.dumps({"trainer_id": request.trainer_id, "session_count": package["session_count"]}),
+                datetime.now(),
+            ),
+        )
+
+        # Create member PT session
+        start_date = date.today()
+        expire_date = start_date + timedelta(days=package["valid_days"])
+
+        cursor.execute(
+            """
+            INSERT INTO member_pt_sessions
+            (user_id, pt_package_id, transaction_id, trainer_id,
+             total_sessions, used_sessions, start_date, expire_date, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                auth["user_id"],
+                package["id"],
+                transaction_id,
+                request.trainer_id,
+                package["session_count"],
+                0,
+                start_date,
+                expire_date,
+                "active",
+                datetime.now(),
+            ),
+        )
+        pt_session_id = cursor.lastrowid
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket PT berhasil dibeli",
+            "data": {
+                "pt_session_id": pt_session_id,
+                "transaction_id": transaction_id,
+                "transaction_code": transaction_code,
+                "package_name": package["name"],
+                "total_sessions": package["session_count"],
+                "expire_date": str(expire_date),
+                "total_paid": grand_total,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error purchasing PT package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "PT_PURCHASE_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

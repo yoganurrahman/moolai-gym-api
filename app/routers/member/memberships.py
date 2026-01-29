@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,13 @@ class PurchaseMembershipRequest(BaseModel):
 class RenewMembershipRequest(BaseModel):
     membership_id: int
     payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
+
+
+class ChangeMembershipRequest(BaseModel):
+    membership_id: int
+    new_package_id: int
+    payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
+    auto_renew: bool = False
 
 
 # ============== Helper Functions ==============
@@ -202,7 +209,9 @@ def get_available_packages(auth: dict = Depends(verify_bearer_token)):
 
 @router.post("/purchase")
 def purchase_membership(
-    request: PurchaseMembershipRequest, auth: dict = Depends(verify_bearer_token)
+    request: PurchaseMembershipRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
     """Purchase a new membership"""
     conn = get_db_connection()
@@ -255,14 +264,15 @@ def purchase_membership(
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, subtotal, subtotal_after_discount,
+            (transaction_code, user_id, branch_id, subtotal, subtotal_after_discount,
              tax_percentage, tax_amount, grand_total, payment_method, payment_status,
              paid_amount, paid_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 transaction_code,
                 auth["user_id"],
+                branch_id,
                 subtotal,
                 subtotal,
                 tax_percentage if tax_enabled else 0,
@@ -365,7 +375,9 @@ def purchase_membership(
 
 @router.post("/renew")
 def renew_membership(
-    request: RenewMembershipRequest, auth: dict = Depends(verify_bearer_token)
+    request: RenewMembershipRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
     """Renew an existing membership"""
     conn = get_db_connection()
@@ -407,14 +419,15 @@ def renew_membership(
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, subtotal, subtotal_after_discount,
+            (transaction_code, user_id, branch_id, subtotal, subtotal_after_discount,
              tax_percentage, tax_amount, grand_total, payment_method, payment_status,
              paid_amount, paid_at, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 transaction_code,
                 auth["user_id"],
+                branch_id,
                 subtotal,
                 subtotal,
                 tax_percentage if tax_enabled else 0,
@@ -504,6 +517,198 @@ def renew_membership(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "RENEW_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/change")
+def change_membership(
+    request: ChangeMembershipRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Change to a different membership package (cancel old, create new)"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Get existing membership
+        cursor.execute(
+            """
+            SELECT mm.*, mp.name as package_name
+            FROM member_memberships mm
+            JOIN membership_packages mp ON mm.package_id = mp.id
+            WHERE mm.id = %s AND mm.user_id = %s AND mm.status = 'active'
+            """,
+            (request.membership_id, auth["user_id"]),
+        )
+        old_membership = cursor.fetchone()
+
+        if not old_membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "MEMBERSHIP_NOT_FOUND", "message": "Membership aktif tidak ditemukan"},
+            )
+
+        # Get new package
+        cursor.execute(
+            "SELECT * FROM membership_packages WHERE id = %s AND is_active = 1",
+            (request.new_package_id,),
+        )
+        new_package = cursor.fetchone()
+
+        if not new_package:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket tidak ditemukan"},
+            )
+
+        if old_membership["package_id"] == request.new_package_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "SAME_PACKAGE", "message": "Paket baru harus berbeda dari paket saat ini"},
+            )
+
+        # Get tax settings
+        cursor.execute("SELECT `key`, `value` FROM settings WHERE `key` IN ('tax_enabled', 'tax_percentage')")
+        settings = {row["key"]: row["value"] for row in cursor.fetchall()}
+        tax_enabled = settings.get("tax_enabled", "false") == "true"
+        tax_percentage = float(settings.get("tax_percentage", "0"))
+
+        # Calculate pricing (full price of new package)
+        subtotal = float(new_package["price"])
+        tax_amount = subtotal * (tax_percentage / 100) if tax_enabled else 0
+        grand_total = subtotal + tax_amount
+
+        # Create transaction
+        transaction_code = generate_transaction_code()
+        cursor.execute(
+            """
+            INSERT INTO transactions
+            (transaction_code, user_id, branch_id, subtotal, subtotal_after_discount,
+             tax_percentage, tax_amount, grand_total, payment_method, payment_status,
+             paid_amount, paid_at, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_code,
+                auth["user_id"],
+                branch_id,
+                subtotal,
+                subtotal,
+                tax_percentage if tax_enabled else 0,
+                tax_amount,
+                grand_total,
+                request.payment_method,
+                "paid",
+                grand_total,
+                datetime.now(),
+                f"Ganti paket dari {old_membership['package_name']} ke {new_package['name']}",
+                datetime.now(),
+            ),
+        )
+        transaction_id = cursor.lastrowid
+
+        # Create transaction item
+        cursor.execute(
+            """
+            INSERT INTO transaction_items
+            (transaction_id, item_type, item_id, item_name, item_description,
+             quantity, unit_price, subtotal, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                transaction_id,
+                "membership",
+                new_package["id"],
+                new_package["name"],
+                f"Ganti dari {old_membership['package_name']}",
+                1,
+                subtotal,
+                subtotal,
+                datetime.now(),
+            ),
+        )
+
+        # Cancel old membership
+        cursor.execute(
+            """
+            UPDATE member_memberships
+            SET status = 'cancelled', cancelled_at = %s,
+                cancellation_reason = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (
+                datetime.now(),
+                f"Ganti ke paket {new_package['name']}",
+                datetime.now(),
+                old_membership["id"],
+            ),
+        )
+
+        # Create new membership
+        start_date = date.today()
+        end_date = None
+        visit_remaining = None
+
+        if new_package["package_type"] == "visit":
+            visit_remaining = new_package["visit_quota"]
+        else:
+            end_date = start_date + timedelta(days=new_package["duration_days"])
+
+        membership_code = generate_membership_code()
+        cursor.execute(
+            """
+            INSERT INTO member_memberships
+            (user_id, package_id, transaction_id, membership_code, start_date, end_date,
+             visit_remaining, class_remaining, status, auto_renew, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                auth["user_id"],
+                new_package["id"],
+                transaction_id,
+                membership_code,
+                start_date,
+                end_date,
+                visit_remaining,
+                new_package["class_quota"],
+                "active",
+                1 if request.auto_renew else 0,
+                datetime.now(),
+            ),
+        )
+        new_membership_id = cursor.lastrowid
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket membership berhasil diganti",
+            "data": {
+                "old_membership_id": old_membership["id"],
+                "new_membership_id": new_membership_id,
+                "membership_code": membership_code,
+                "transaction_id": transaction_id,
+                "transaction_code": transaction_code,
+                "package_name": new_package["name"],
+                "start_date": str(start_date),
+                "end_date": str(end_date) if end_date else None,
+                "visit_remaining": visit_remaining,
+                "total_paid": grand_total,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error changing membership: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "CHANGE_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()
