@@ -839,7 +839,7 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
 
 @router.delete("/bookings/{booking_id}")
 def cancel_booking_admin(booking_id: int, auth: dict = Depends(verify_bearer_token)):
-    """Cancel a booking (admin)"""
+    """Cancel a booking (admin) - refunds class quota"""
     check_permission(auth, "class.update")
 
     conn = get_db_connection()
@@ -866,11 +866,36 @@ def cancel_booking_admin(booking_id: int, auth: dict = Depends(verify_bearer_tok
             """,
             (datetime.now(), datetime.now(), booking_id),
         )
+
+        # Refund class quota based on access_type
+        if booking.get("access_type") == "membership" and booking.get("membership_id"):
+            # Refund membership class quota (only if not unlimited)
+            cursor.execute(
+                "SELECT class_remaining FROM member_memberships WHERE id = %s",
+                (booking["membership_id"],),
+            )
+            mm = cursor.fetchone()
+            if mm and mm["class_remaining"] is not None:
+                cursor.execute(
+                    "UPDATE member_memberships SET class_remaining = class_remaining + 1 WHERE id = %s",
+                    (booking["membership_id"],),
+                )
+        elif booking.get("access_type") == "class_pass" and booking.get("class_pass_id"):
+            # Refund class pass
+            cursor.execute(
+                """
+                UPDATE member_class_passes
+                SET used_classes = used_classes - 1, remaining_classes = remaining_classes + 1
+                WHERE id = %s
+                """,
+                (booking["class_pass_id"],),
+            )
+
         conn.commit()
 
         return {
             "success": True,
-            "message": "Booking berhasil dibatalkan",
+            "message": "Booking berhasil dibatalkan dan kuota dikembalikan",
         }
 
     except HTTPException:

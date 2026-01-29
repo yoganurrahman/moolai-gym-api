@@ -1,5 +1,5 @@
 """
-Mobile Memberships Router - Member's membership endpoints
+Member Memberships Router - Member's membership endpoints
 """
 import logging
 import uuid
@@ -14,7 +14,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/memberships", tags=["Mobile - Memberships"])
+router = APIRouter(prefix="/memberships", tags=["Member - Memberships"])
 
 
 # ============== Request/Response Models ==============

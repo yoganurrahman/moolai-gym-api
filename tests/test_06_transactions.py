@@ -322,10 +322,10 @@ def run_transaction_tests() -> TestResult:
         result.add_skip("Get Transaction Details", "Missing token or transaction ID")
 
     # ===== Test 12: View My Transaction History (Mobile) =====
-    print_info("Viewing my transaction history (mobile)...")
+    print_info("Viewing my transaction history (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/transactions/history")
+        response = client.get("/api/member/transactions/history")
 
         if response.status_code == 200:
             try:

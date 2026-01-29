@@ -1,5 +1,5 @@
 """
-Mobile Transactions Router - Member's transaction history
+Member Transactions Router - Member's transaction history
 """
 import logging
 from datetime import datetime
@@ -12,7 +12,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/transactions", tags=["Mobile - Transactions"])
+router = APIRouter(prefix="/transactions", tags=["Member - Transactions"])
 
 
 # ============== Endpoints ==============

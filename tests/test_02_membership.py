@@ -247,10 +247,10 @@ def run_membership_tests() -> TestResult:
         result.add_skip("Unfreeze Membership", "Missing token or membership ID")
 
     # ===== Test 9: Member Views Own Membership (Mobile) =====
-    print_info("Member viewing own membership (mobile)...")
+    print_info("Member viewing own membership (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/memberships/my")
+        response = client.get("/api/member/memberships/my")
 
         if response.status_code == 200:
             result.add_pass("Member View Own Membership")
@@ -299,7 +299,7 @@ def run_membership_tests() -> TestResult:
     print_info("Getting member QR code...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/profile/qr-code")
+        response = client.get("/api/member/profile/qr-code")
 
         if response.status_code == 200:
             try:

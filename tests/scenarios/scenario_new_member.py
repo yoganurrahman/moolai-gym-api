@@ -132,7 +132,7 @@ def run_scenario():
     print_header("STEP 3: Get Member QR Code")
 
     client.set_token(member_token)
-    response = client.get("/api/mobile/profile/qr-code")
+    response = client.get("/api/member/profile/qr-code")
 
     if response.status_code == 200:
         data = response.json()
@@ -149,7 +149,7 @@ def run_scenario():
     print_header("STEP 4: First Check-in at Gym")
 
     print_info("Member scanning QR for check-in...")
-    response = client.post("/api/mobile/checkins/scan", {
+    response = client.post("/api/member/checkins/scan", {
         "qr_code": qr_code or "member_qr"
     })
 
@@ -170,7 +170,7 @@ def run_scenario():
     print_header("STEP 5: Browse & Book Fitness Class")
 
     print_info("Browsing available classes...")
-    response = client.get("/api/mobile/classes/available")
+    response = client.get("/api/member/classes/available")
 
     schedule_id = None
     if response.status_code == 200:
@@ -186,7 +186,7 @@ def run_scenario():
 
     if schedule_id:
         print_info("Booking the class...")
-        response = client.post("/api/mobile/classes/book", {
+        response = client.post("/api/member/classes/book", {
             "schedule_id": schedule_id
         })
 
@@ -206,7 +206,7 @@ def run_scenario():
     print_header("STEP 6: Book Personal Training Session")
 
     print_info("Browsing available trainers...")
-    response = client.get("/api/mobile/pt/trainers")
+    response = client.get("/api/member/pt/trainers")
 
     trainer_id = None
     if response.status_code == 200:
@@ -223,7 +223,7 @@ def run_scenario():
     if trainer_id:
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         print_info(f"Booking PT session for {tomorrow}...")
-        response = client.post("/api/mobile/pt/book", {
+        response = client.post("/api/member/pt/book", {
             "trainer_id": trainer_id,
             "session_date": tomorrow,
             "start_time": "10:00",
@@ -295,7 +295,7 @@ def run_scenario():
     print_header("STEP 8: Check-out")
 
     client.set_token(member_token)
-    response = client.post("/api/mobile/checkins/checkout")
+    response = client.post("/api/member/checkins/checkout")
 
     if response.status_code == 200:
         result.add_pass("Check-out successful")

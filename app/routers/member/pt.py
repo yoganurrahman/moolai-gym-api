@@ -1,5 +1,5 @@
 """
-Mobile PT Router - Personal Training for members
+Member PT Router - Personal Training for members
 """
 import logging
 import uuid
@@ -14,7 +14,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/pt", tags=["Mobile - Personal Training"])
+router = APIRouter(prefix="/pt", tags=["Member - Personal Training"])
 
 
 # ============== Request Models ==============

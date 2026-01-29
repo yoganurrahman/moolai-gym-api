@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-router = APIRouter(prefix="/api/mobile")
+router = APIRouter(prefix="/api/member")
 
 from . import memberships, checkins, classes, pt, transactions, profile
 

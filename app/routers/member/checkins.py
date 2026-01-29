@@ -1,5 +1,5 @@
 """
-Mobile Check-ins Router - Member check-in/out via QR
+Member Check-ins Router - Member check-in/out via QR
 """
 import logging
 from datetime import datetime, date, timedelta
@@ -12,7 +12,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/checkins", tags=["Mobile - Check-ins"])
+router = APIRouter(prefix="/checkins", tags=["Member - Check-ins"])
 
 
 # ============== Endpoints ==============
@@ -40,39 +40,56 @@ def scan_checkin(auth: dict = Depends(verify_bearer_token)):
         )
         membership = cursor.fetchone()
 
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "NO_ACTIVE_MEMBERSHIP",
-                    "message": "Anda tidak memiliki membership aktif",
-                },
-            )
+        # Determine checkin type and access source
+        checkin_type = None
+        checkin_membership_id = None
+        checkin_class_pass_id = None
 
-        # Check if membership expired
-        if membership["end_date"] and membership["end_date"] < date.today():
-            # Update status to expired
+        if membership:
+            # Check if membership expired
+            if membership["end_date"] and membership["end_date"] < date.today():
+                # Update status to expired
+                cursor.execute(
+                    "UPDATE member_memberships SET status = 'expired', updated_at = %s WHERE id = %s",
+                    (datetime.now(), membership["id"]),
+                )
+                conn.commit()
+                membership = None  # Treat as no membership
+            elif membership["package_type"] == "visit":
+                if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+                    membership = None  # No visits left, check class pass
+                else:
+                    checkin_type = "gym"
+                    checkin_membership_id = membership["id"]
+            else:
+                checkin_type = "gym"
+                checkin_membership_id = membership["id"]
+
+        # If no valid membership, check for class pass (class-only check-in)
+        if not checkin_type:
             cursor.execute(
-                "UPDATE member_memberships SET status = 'expired', updated_at = %s WHERE id = %s",
-                (datetime.now(), membership["id"]),
+                """
+                SELECT mcp.*, cpt.name as pass_name
+                FROM member_class_passes mcp
+                JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+                WHERE mcp.user_id = %s AND mcp.status = 'active' AND mcp.remaining_classes > 0
+                  AND (mcp.expire_date IS NULL OR mcp.expire_date >= %s)
+                ORDER BY mcp.expire_date ASC
+                LIMIT 1
+                """,
+                (user_id, date.today()),
             )
-            conn.commit()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "MEMBERSHIP_EXPIRED",
-                    "message": "Membership Anda sudah expired. Silakan perpanjang.",
-                },
-            )
+            class_pass = cursor.fetchone()
 
-        # Check visit quota for visit-based membership
-        if membership["package_type"] == "visit":
-            if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+            if class_pass:
+                checkin_type = "class_only"
+                checkin_class_pass_id = class_pass["id"]
+            else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
-                        "error_code": "NO_VISIT_REMAINING",
-                        "message": "Kuota kunjungan Anda habis. Silakan perpanjang.",
+                        "error_code": "NO_ACTIVE_MEMBERSHIP",
+                        "message": "Anda tidak memiliki membership aktif atau class pass yang valid",
                     },
                 )
 
@@ -119,15 +136,17 @@ def scan_checkin(auth: dict = Depends(verify_bearer_token)):
         cursor.execute(
             """
             INSERT INTO member_checkins
-            (user_id, membership_id, checkin_time, checkin_method, created_at)
-            VALUES (%s, %s, %s, %s, %s)
+            (user_id, checkin_type, membership_id, class_pass_id, checkin_time, checkin_method, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (user_id, membership["id"], datetime.now(), "qr_code", datetime.now()),
+            (user_id, checkin_type, checkin_membership_id, checkin_class_pass_id,
+             datetime.now(), "qr_code", datetime.now()),
         )
         checkin_id = cursor.lastrowid
 
         # Deduct visit for visit-based membership
-        if membership["package_type"] == "visit":
+        new_visit_remaining = None
+        if checkin_type == "gym" and membership and membership["package_type"] == "visit":
             cursor.execute(
                 """
                 UPDATE member_memberships
@@ -137,25 +156,41 @@ def scan_checkin(auth: dict = Depends(verify_bearer_token)):
                 (datetime.now(), membership["id"]),
             )
             new_visit_remaining = membership["visit_remaining"] - 1
-        else:
-            new_visit_remaining = None
 
         conn.commit()
 
-        return {
-            "success": True,
-            "message": "Check-in berhasil",
-            "data": {
-                "checkin_id": checkin_id,
-                "checkin_time": datetime.now().isoformat(),
-                "membership": {
-                    "code": membership["membership_code"],
-                    "package": membership["package_name"],
-                    "end_date": str(membership["end_date"]) if membership["end_date"] else None,
-                    "visit_remaining": new_visit_remaining,
+        # Build response based on checkin type
+        if checkin_type == "gym":
+            return {
+                "success": True,
+                "message": "Check-in berhasil",
+                "data": {
+                    "checkin_id": checkin_id,
+                    "checkin_type": "gym",
+                    "checkin_time": datetime.now().isoformat(),
+                    "membership": {
+                        "code": membership["membership_code"],
+                        "package": membership["package_name"],
+                        "end_date": str(membership["end_date"]) if membership["end_date"] else None,
+                        "visit_remaining": new_visit_remaining,
+                    },
                 },
-            },
-        }
+            }
+        else:
+            return {
+                "success": True,
+                "message": "Check-in kelas berhasil",
+                "data": {
+                    "checkin_id": checkin_id,
+                    "checkin_type": "class_only",
+                    "checkin_time": datetime.now().isoformat(),
+                    "class_pass": {
+                        "id": class_pass["id"],
+                        "name": class_pass["pass_name"],
+                        "remaining_classes": class_pass["remaining_classes"],
+                    },
+                },
+            }
 
     except HTTPException:
         raise

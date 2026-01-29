@@ -38,7 +38,7 @@ def run_checkin_tests() -> TestResult:
     print_info("Testing QR scan check-in...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.post("/api/mobile/checkins/scan", {
+        response = client.post("/api/member/checkins/scan", {
             "qr_code": test_data.qr_code or "test_qr_code"
         })
 
@@ -95,7 +95,7 @@ def run_checkin_tests() -> TestResult:
     if test_data.member_token:
         client.set_token(test_data.member_token)
         # Try to check-in again immediately
-        response = client.post("/api/mobile/checkins/scan", {
+        response = client.post("/api/member/checkins/scan", {
             "qr_code": test_data.qr_code or "test_qr_code"
         })
 
@@ -114,7 +114,7 @@ def run_checkin_tests() -> TestResult:
     print_info("Viewing current check-in status...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/checkins/status")
+        response = client.get("/api/member/checkins/status")
 
         if response.status_code == 200:
             try:
@@ -135,7 +135,7 @@ def run_checkin_tests() -> TestResult:
     print_info("Viewing member check-in history...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/checkins/history")
+        response = client.get("/api/member/checkins/history")
 
         if response.status_code == 200:
             try:
@@ -155,7 +155,7 @@ def run_checkin_tests() -> TestResult:
     print_info("Testing check-out...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.post("/api/mobile/checkins/checkout")
+        response = client.post("/api/member/checkins/checkout")
 
         if response.status_code == 200:
             result.add_pass("Check-out")
@@ -278,7 +278,7 @@ def run_checkin_tests() -> TestResult:
             temp_token = response.json().get("access_token")
             if temp_token:
                 client.set_token(temp_token)
-                response = client.post("/api/mobile/checkins/scan", {
+                response = client.post("/api/member/checkins/scan", {
                     "qr_code": "test_qr"
                 })
 

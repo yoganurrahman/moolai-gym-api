@@ -1,5 +1,5 @@
 """
-Mobile Profile Router - Member profile management
+Member Profile Router - Member profile management
 """
 import logging
 from datetime import datetime
@@ -13,7 +13,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/profile", tags=["Mobile - Profile"])
+router = APIRouter(prefix="/profile", tags=["Member - Profile"])
 
 
 # ============== Request Models ==============

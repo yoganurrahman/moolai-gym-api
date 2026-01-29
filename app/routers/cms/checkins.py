@@ -20,6 +20,7 @@ router = APIRouter(prefix="/checkins", tags=["CMS - Check-ins"])
 
 class ManualCheckinRequest(BaseModel):
     user_id: int
+    checkin_type: Optional[str] = None  # 'gym' or 'class_only', auto-detected if not provided
     notes: Optional[str] = None
 
 
@@ -77,6 +78,8 @@ def get_all_checkins(
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
+            LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
+            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
             {where_sql}
             """,
             params
@@ -89,12 +92,15 @@ def get_all_checkins(
             f"""
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
                    mm.membership_code, mp.name as package_name,
-                   staff.name as checked_in_by_name
+                   staff.name as checked_in_by_name,
+                   cpt.name as class_pass_name
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN users staff ON mc.checked_in_by = staff.id
+            LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
+            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
             {where_sql}
             ORDER BY mc.checkin_time DESC
             LIMIT %s OFFSET %s
@@ -170,11 +176,14 @@ def get_today_checkins(
         cursor.execute(
             """
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
-                   mm.membership_code, mp.name as package_name
+                   mm.membership_code, mp.name as package_name,
+                   cpt.name as class_pass_name
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
+            LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
+            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
             WHERE mc.checkin_time BETWEEN %s AND %s
             ORDER BY mc.checkin_time DESC
             LIMIT %s OFFSET %s
@@ -189,7 +198,9 @@ def get_today_checkins(
             SELECT
                 COUNT(*) as total_checkins,
                 COUNT(DISTINCT user_id) as unique_members,
-                COUNT(CASE WHEN checkout_time IS NULL THEN 1 END) as currently_in
+                COUNT(CASE WHEN checkout_time IS NULL THEN 1 END) as currently_in,
+                COUNT(CASE WHEN checkin_type = 'gym' THEN 1 END) as gym_checkins,
+                COUNT(CASE WHEN checkin_type = 'class_only' THEN 1 END) as class_only_checkins
             FROM member_checkins
             WHERE checkin_time BETWEEN %s AND %s
             """,
@@ -236,11 +247,14 @@ def get_currently_in_members(
         cursor.execute(
             """
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
-                   mm.membership_code, mp.name as package_name
+                   mm.membership_code, mp.name as package_name,
+                   cpt.name as class_pass_name
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
+            LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
+            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
             WHERE mc.checkout_time IS NULL
             ORDER BY mc.checkin_time ASC
             """
@@ -291,6 +305,13 @@ def manual_checkin(
                 detail={"error_code": "USER_NOT_FOUND", "message": "User tidak ditemukan"},
             )
 
+        # Determine checkin type and access source
+        checkin_type = None
+        checkin_membership_id = None
+        checkin_class_pass_id = None
+        membership = None
+        class_pass = None
+
         # Get user's active membership
         cursor.execute(
             """
@@ -305,33 +326,49 @@ def manual_checkin(
         )
         membership = cursor.fetchone()
 
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "NO_ACTIVE_MEMBERSHIP",
-                    "message": "Member tidak memiliki membership aktif",
-                },
-            )
+        if membership:
+            # Check if membership expired
+            if membership["end_date"] and membership["end_date"] < date.today():
+                membership = None  # Expired, check class pass
+            elif membership["package_type"] == "visit":
+                if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+                    membership = None  # No visits left
+                else:
+                    checkin_type = "gym"
+                    checkin_membership_id = membership["id"]
+            else:
+                checkin_type = "gym"
+                checkin_membership_id = membership["id"]
 
-        # Check if membership expired
-        if membership["end_date"] and membership["end_date"] < date.today():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "MEMBERSHIP_EXPIRED",
-                    "message": "Membership member sudah expired",
-                },
-            )
+        # Override checkin_type if staff explicitly set class_only
+        if request.checkin_type == "class_only":
+            checkin_type = None  # Force class pass lookup
 
-        # Check visit quota
-        if membership["package_type"] == "visit":
-            if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+        # If no gym access or explicitly class_only, check for class pass
+        if not checkin_type:
+            cursor.execute(
+                """
+                SELECT mcp.*, cpt.name as pass_name
+                FROM member_class_passes mcp
+                JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+                WHERE mcp.user_id = %s AND mcp.status = 'active' AND mcp.remaining_classes > 0
+                  AND (mcp.expire_date IS NULL OR mcp.expire_date >= %s)
+                ORDER BY mcp.expire_date ASC
+                LIMIT 1
+                """,
+                (request.user_id, date.today()),
+            )
+            class_pass = cursor.fetchone()
+
+            if class_pass:
+                checkin_type = "class_only"
+                checkin_class_pass_id = class_pass["id"]
+            else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
-                        "error_code": "NO_VISIT_REMAINING",
-                        "message": "Kuota kunjungan member habis",
+                        "error_code": "NO_ACTIVE_MEMBERSHIP",
+                        "message": "Member tidak memiliki membership aktif atau class pass yang valid",
                     },
                 )
 
@@ -356,12 +393,15 @@ def manual_checkin(
         cursor.execute(
             """
             INSERT INTO member_checkins
-            (user_id, membership_id, checkin_time, checkin_method, checked_in_by, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (user_id, checkin_type, membership_id, class_pass_id,
+             checkin_time, checkin_method, checked_in_by, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.user_id,
-                membership["id"],
+                checkin_type,
+                checkin_membership_id,
+                checkin_class_pass_id,
                 datetime.now(),
                 "manual",
                 auth["user_id"],
@@ -373,7 +413,7 @@ def manual_checkin(
 
         # Deduct visit for visit-based membership
         new_visit_remaining = None
-        if membership["package_type"] == "visit":
+        if checkin_type == "gym" and membership and membership["package_type"] == "visit":
             cursor.execute(
                 """
                 UPDATE member_memberships
@@ -386,15 +426,23 @@ def manual_checkin(
 
         conn.commit()
 
+        # Build response
+        response_data = {
+            "checkin_id": checkin_id,
+            "checkin_type": checkin_type,
+            "member_name": user["name"],
+        }
+        if checkin_type == "gym":
+            response_data["package_name"] = membership["package_name"]
+            response_data["visit_remaining"] = new_visit_remaining
+        else:
+            response_data["class_pass_name"] = class_pass["pass_name"]
+            response_data["remaining_classes"] = class_pass["remaining_classes"]
+
         return {
             "success": True,
             "message": f"Check-in manual berhasil untuk {user['name']}",
-            "data": {
-                "checkin_id": checkin_id,
-                "member_name": user["name"],
-                "package_name": membership["package_name"],
-                "visit_remaining": new_visit_remaining,
-            },
+            "data": response_data,
         }
 
     except HTTPException:

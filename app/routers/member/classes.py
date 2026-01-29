@@ -1,5 +1,5 @@
 """
-Mobile Classes Router - Class schedules and booking for members
+Member Classes Router - Class schedules and booking for members
 """
 import logging
 from datetime import datetime, date, timedelta
@@ -13,7 +13,7 @@ from app.middleware import verify_bearer_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/classes", tags=["Mobile - Classes"])
+router = APIRouter(prefix="/classes", tags=["Member - Classes"])
 
 
 # ============== Request Models ==============
@@ -268,12 +268,15 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
         )
         membership = cursor.fetchone()
 
-        has_class_access = False
+        access_type = None
+        booking_membership_id = None
+        booking_class_pass_id = None
 
         if membership and membership["include_classes"]:
             # Check if has quota or unlimited
             if membership["class_remaining"] is None or membership["class_remaining"] > 0:
-                has_class_access = True
+                access_type = "membership"
+                booking_membership_id = membership["id"]
                 # Deduct class quota if not unlimited
                 if membership["class_remaining"] is not None:
                     cursor.execute(
@@ -281,7 +284,7 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
                         (membership["id"],),
                     )
 
-        if not has_class_access:
+        if not access_type:
             # Check class pass
             cursor.execute(
                 """
@@ -295,7 +298,8 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
             class_pass = cursor.fetchone()
 
             if class_pass:
-                has_class_access = True
+                access_type = "class_pass"
+                booking_class_pass_id = class_pass["id"]
                 cursor.execute(
                     "UPDATE member_class_passes SET used_classes = used_classes + 1, remaining_classes = remaining_classes - 1 WHERE id = %s",
                     (class_pass["id"],),
@@ -313,10 +317,13 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
         cursor.execute(
             """
             INSERT INTO class_bookings
-            (user_id, schedule_id, class_date, status, booked_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
+             status, booked_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (user_id, request.schedule_id, request.class_date, "booked", datetime.now(), datetime.now()),
+            (user_id, request.schedule_id, request.class_date, access_type,
+             booking_membership_id, booking_class_pass_id,
+             "booked", datetime.now(), datetime.now()),
         )
         booking_id = cursor.lastrowid
         conn.commit()
@@ -356,7 +363,7 @@ def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
     try:
         user_id = auth["user_id"]
 
-        # Get booking
+        # Get booking (include access_type, membership_id, class_pass_id for refund)
         cursor.execute(
             """
             SELECT cb.*, cs.start_time
@@ -398,6 +405,32 @@ def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
             """,
             (datetime.now(), datetime.now(), booking_id),
         )
+
+        # Refund class quota based on access_type
+        if booking.get("access_type") == "membership" and booking.get("membership_id"):
+            # Refund membership class quota (only if not unlimited)
+            cursor.execute(
+                """
+                SELECT class_remaining FROM member_memberships WHERE id = %s
+                """,
+                (booking["membership_id"],),
+            )
+            mm = cursor.fetchone()
+            if mm and mm["class_remaining"] is not None:
+                cursor.execute(
+                    "UPDATE member_memberships SET class_remaining = class_remaining + 1 WHERE id = %s",
+                    (booking["membership_id"],),
+                )
+        elif booking.get("access_type") == "class_pass" and booking.get("class_pass_id"):
+            # Refund class pass
+            cursor.execute(
+                """
+                UPDATE member_class_passes
+                SET used_classes = used_classes - 1, remaining_classes = remaining_classes + 1
+                WHERE id = %s
+                """,
+                (booking["class_pass_id"],),
+            )
 
         conn.commit()
 

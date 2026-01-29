@@ -169,10 +169,10 @@ def run_class_tests() -> TestResult:
         result.add_skip("List Class Schedules", "No admin token")
 
     # ===== Test 6: View Available Classes (Mobile) =====
-    print_info("Viewing available classes (mobile)...")
+    print_info("Viewing available classes (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/classes/available")
+        response = client.get("/api/member/classes/available")
 
         if response.status_code == 200:
             result.add_pass("View Available Classes")
@@ -188,7 +188,7 @@ def run_class_tests() -> TestResult:
     if test_data.class_schedule_id:
         if test_data.member_token:
             client.set_token(test_data.member_token)
-            response = client.get(f"/api/mobile/classes/{test_data.class_schedule_id}")
+            response = client.get(f"/api/member/classes/{test_data.class_schedule_id}")
         elif test_data.admin_token:
             client.set_token(test_data.admin_token)
             response = client.get(f"/api/cms/classes/schedules/{test_data.class_schedule_id}")
@@ -207,10 +207,10 @@ def run_class_tests() -> TestResult:
         result.add_skip("Get Class Schedule Details", "No schedule ID")
 
     # ===== Test 8: Book a Class (Mobile) =====
-    print_info("Booking a class (mobile)...")
+    print_info("Booking a class (member)...")
     if test_data.member_token and test_data.class_schedule_id:
         client.set_token(test_data.member_token)
-        response = client.post("/api/mobile/classes/book", {
+        response = client.post("/api/member/classes/book", {
             "schedule_id": test_data.class_schedule_id
         })
 
@@ -234,10 +234,10 @@ def run_class_tests() -> TestResult:
         result.add_skip("Book a Class", "Missing member token or schedule ID")
 
     # ===== Test 9: View My Bookings (Mobile) =====
-    print_info("Viewing my class bookings (mobile)...")
+    print_info("Viewing my class bookings (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/classes/my-bookings")
+        response = client.get("/api/member/classes/my-bookings")
 
         if response.status_code == 200:
             try:
@@ -259,7 +259,7 @@ def run_class_tests() -> TestResult:
     print_info("Testing double booking prevention...")
     if test_data.member_token and test_data.class_schedule_id:
         client.set_token(test_data.member_token)
-        response = client.post("/api/mobile/classes/book", {
+        response = client.post("/api/member/classes/book", {
             "schedule_id": test_data.class_schedule_id
         })
 
@@ -311,10 +311,10 @@ def run_class_tests() -> TestResult:
         result.add_skip("Mark Class Attendance", "Missing token or booking ID")
 
     # ===== Test 13: Cancel Class Booking (Mobile) =====
-    print_info("Canceling class booking (mobile)...")
+    print_info("Canceling class booking (member)...")
     if test_data.member_token and test_data.class_booking_id:
         client.set_token(test_data.member_token)
-        response = client.post(f"/api/mobile/classes/bookings/{test_data.class_booking_id}/cancel")
+        response = client.post(f"/api/member/classes/bookings/{test_data.class_booking_id}/cancel")
 
         if response.status_code == 200:
             result.add_pass("Cancel Class Booking")

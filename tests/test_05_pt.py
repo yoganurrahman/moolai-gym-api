@@ -178,10 +178,10 @@ def run_pt_tests() -> TestResult:
         result.add_skip("Purchase PT Package for Member", "Missing required data")
 
     # ===== Test 7: View Available Trainers (Mobile) =====
-    print_info("Viewing available trainers (mobile)...")
+    print_info("Viewing available trainers (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/pt/trainers")
+        response = client.get("/api/member/pt/trainers")
 
         if response.status_code == 200:
             result.add_pass("View Available Trainers (Mobile)")
@@ -198,7 +198,7 @@ def run_pt_tests() -> TestResult:
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         if test_data.member_token:
             client.set_token(test_data.member_token)
-            response = client.get(f"/api/mobile/pt/trainers/{test_data.trainer_id}/availability", params={
+            response = client.get(f"/api/member/pt/trainers/{test_data.trainer_id}/availability", params={
                 "date": tomorrow
             })
         elif test_data.admin_token:
@@ -222,11 +222,11 @@ def run_pt_tests() -> TestResult:
         result.add_skip("Check Trainer Availability", "No trainer ID")
 
     # ===== Test 9: Book PT Session (Mobile) =====
-    print_info("Booking PT session (mobile)...")
+    print_info("Booking PT session (member)...")
     if test_data.member_token and test_data.trainer_id:
         client.set_token(test_data.member_token)
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        response = client.post("/api/mobile/pt/book", {
+        response = client.post("/api/member/pt/book", {
             "trainer_id": test_data.trainer_id,
             "session_date": tomorrow,
             "start_time": "14:00",
@@ -254,10 +254,10 @@ def run_pt_tests() -> TestResult:
         result.add_skip("Book PT Session", "Missing member token or trainer ID")
 
     # ===== Test 10: View My PT Sessions (Mobile) =====
-    print_info("Viewing my PT sessions (mobile)...")
+    print_info("Viewing my PT sessions (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/pt/my-sessions")
+        response = client.get("/api/member/pt/my-sessions")
 
         if response.status_code == 200:
             try:
@@ -276,10 +276,10 @@ def run_pt_tests() -> TestResult:
         result.add_skip("View My PT Sessions", "No member token")
 
     # ===== Test 11: View PT Remaining Sessions (Mobile) =====
-    print_info("Viewing remaining PT sessions (mobile)...")
+    print_info("Viewing remaining PT sessions (member)...")
     if test_data.member_token:
         client.set_token(test_data.member_token)
-        response = client.get("/api/mobile/pt/remaining")
+        response = client.get("/api/member/pt/remaining")
 
         if response.status_code == 200:
             try:
@@ -339,7 +339,7 @@ def run_pt_tests() -> TestResult:
         client.set_token(test_data.member_token)
         # Book another session to cancel
         day_after = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
-        response = client.post("/api/mobile/pt/book", {
+        response = client.post("/api/member/pt/book", {
             "trainer_id": test_data.trainer_id,
             "session_date": day_after,
             "start_time": "10:00",
@@ -352,7 +352,7 @@ def run_pt_tests() -> TestResult:
                 new_session_id = data.get("id") or data.get("session_id") or data.get("data", {}).get("id")
                 if new_session_id:
                     # Cancel this session
-                    response = client.post(f"/api/mobile/pt/sessions/{new_session_id}/cancel", {
+                    response = client.post(f"/api/member/pt/sessions/{new_session_id}/cancel", {
                         "reason": "Schedule conflict"
                     })
                     if response.status_code == 200:

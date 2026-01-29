@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 # Import routers
 from app.routers import health, auth
 from app.routers.cms import router as cms_router
-from app.routers.mobile import router as mobile_router
+from app.routers.member import router as member_router
+from app.routers.trainer import router as trainer_router
 
 
 @asynccontextmanager
@@ -68,7 +69,8 @@ def root():
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(cms_router)
-app.include_router(mobile_router)
+app.include_router(member_router)
+app.include_router(trainer_router)
 
 
 if __name__ == "__main__":
