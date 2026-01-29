@@ -22,6 +22,7 @@ class UserCreateRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=100)
     phone: Optional[str] = Field(None, max_length=20)
     role_id: int
+    default_branch_id: Optional[int] = None
     is_active: bool = True
 
 
@@ -30,6 +31,7 @@ class UserUpdateRequest(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=20)
     role_id: Optional[int] = None
+    default_branch_id: Optional[int] = None
     is_active: Optional[bool] = None
 
 
@@ -59,10 +61,12 @@ def list_users(
     try:
         # Build query
         query = """
-            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.created_at,
-                   r.id as role_id, r.name as role_name
+            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.default_branch_id, u.created_at,
+                   r.id as role_id, r.name as role_name,
+                   b.name as default_branch_name, b.code as default_branch_code
             FROM users u
             LEFT JOIN roles r ON u.role_id = r.id
+            LEFT JOIN branches b ON u.default_branch_id = b.id
             WHERE 1=1
         """
         count_query = "SELECT COUNT(*) as total FROM users u WHERE 1=1"
@@ -111,6 +115,14 @@ def list_users(
                 "id": user.pop("role_id"),
                 "name": user.pop("role_name"),
             }
+            branch_id = user.pop("default_branch_id", None)
+            branch_name = user.pop("default_branch_name", None)
+            branch_code = user.pop("default_branch_code", None)
+            user["default_branch"] = {
+                "id": branch_id,
+                "name": branch_name,
+                "code": branch_code,
+            } if branch_id else None
 
         return {
             "success": True,
@@ -150,10 +162,13 @@ def get_user(
     try:
         cursor.execute(
             """
-            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.created_at, u.updated_at,
-                   r.id as role_id, r.name as role_name
+            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.default_branch_id,
+                   u.created_at, u.updated_at,
+                   r.id as role_id, r.name as role_name,
+                   b.name as default_branch_name, b.code as default_branch_code
             FROM users u
             LEFT JOIN roles r ON u.role_id = r.id
+            LEFT JOIN branches b ON u.default_branch_id = b.id
             WHERE u.id = %s
             """,
             (user_id,),
@@ -176,6 +191,14 @@ def get_user(
             "id": user.pop("role_id"),
             "name": user.pop("role_name"),
         }
+        branch_id = user.pop("default_branch_id", None)
+        branch_name = user.pop("default_branch_name", None)
+        branch_code = user.pop("default_branch_code", None)
+        user["default_branch"] = {
+            "id": branch_id,
+            "name": branch_name,
+            "code": branch_code,
+        } if branch_id else None
 
         return {"success": True, "data": user}
 
@@ -222,14 +245,26 @@ def create_user(
                 detail={"error_code": "ROLE_NOT_FOUND", "message": "Role tidak ditemukan"},
             )
 
+        # Validate default_branch_id if provided
+        if request.default_branch_id is not None:
+            cursor.execute(
+                "SELECT id FROM branches WHERE id = %s AND is_active = 1",
+                (request.default_branch_id,),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "INVALID_BRANCH", "message": "Cabang tidak ditemukan atau tidak aktif"},
+                )
+
         # Hash password
         hashed_password = hash_password(request.password)
 
         # Insert user
         cursor.execute(
             """
-            INSERT INTO users (name, email, password, phone, role_id, is_active, token_version, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO users (name, email, password, phone, role_id, default_branch_id, is_active, token_version, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.name,
@@ -237,6 +272,7 @@ def create_user(
                 hashed_password,
                 request.phone,
                 request.role_id,
+                request.default_branch_id,
                 1 if request.is_active else 0,
                 1,
                 datetime.now(),
@@ -327,6 +363,20 @@ def update_user(
                 )
             update_fields.append("role_id = %s")
             params.append(request.role_id)
+
+        if request.default_branch_id is not None:
+            # Validate branch
+            cursor.execute(
+                "SELECT id FROM branches WHERE id = %s AND is_active = 1",
+                (request.default_branch_id,),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "INVALID_BRANCH", "message": "Cabang tidak ditemukan atau tidak aktif"},
+                )
+            update_fields.append("default_branch_id = %s")
+            params.append(request.default_branch_id)
 
         if request.is_active is not None:
             update_fields.append("is_active = %s")

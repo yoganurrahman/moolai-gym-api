@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/checkins", tags=["Member - Check-ins"])
 # ============== Endpoints ==============
 
 @router.post("/scan")
-def scan_checkin(auth: dict = Depends(verify_bearer_token)):
+def scan_checkin(branch_id: int = Depends(require_branch_id), auth: dict = Depends(verify_bearer_token)):
     """Check-in member via QR scan"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -136,10 +136,10 @@ def scan_checkin(auth: dict = Depends(verify_bearer_token)):
         cursor.execute(
             """
             INSERT INTO member_checkins
-            (user_id, checkin_type, membership_id, class_pass_id, checkin_time, checkin_method, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (branch_id, user_id, checkin_type, membership_id, class_pass_id, checkin_time, checkin_method, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (user_id, checkin_type, checkin_membership_id, checkin_class_pass_id,
+            (branch_id, user_id, checkin_type, checkin_membership_id, checkin_class_pass_id,
              datetime.now(), "qr_code", datetime.now()),
         )
         checkin_id = cursor.lastrowid
@@ -279,10 +279,12 @@ def get_checkin_status(auth: dict = Depends(verify_bearer_token)):
         # Find active check-in
         cursor.execute(
             """
-            SELECT mc.*, mm.membership_code, mp.name as package_name
+            SELECT mc.*, mm.membership_code, mp.name as package_name,
+                   br.name as branch_name, br.code as branch_code
             FROM member_checkins mc
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
+            LEFT JOIN branches br ON mc.branch_id = br.id
             WHERE mc.user_id = %s AND mc.checkout_time IS NULL
             ORDER BY mc.checkin_time DESC
             LIMIT 1
@@ -302,6 +304,8 @@ def get_checkin_status(auth: dict = Depends(verify_bearer_token)):
                     "duration_minutes": duration_minutes,
                     "membership_code": checkin["membership_code"],
                     "package_name": checkin["package_name"],
+                    "branch_name": checkin.get("branch_name"),
+                    "branch_code": checkin.get("branch_code"),
                 },
             }
         else:
@@ -345,10 +349,12 @@ def get_my_checkin_history(
         offset = (page - 1) * limit
         cursor.execute(
             """
-            SELECT mc.*, mm.membership_code, mp.name as package_name
+            SELECT mc.*, mm.membership_code, mp.name as package_name,
+                   br.name as branch_name, br.code as branch_code
             FROM member_checkins mc
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
+            LEFT JOIN branches br ON mc.branch_id = br.id
             WHERE mc.user_id = %s
             ORDER BY mc.checkin_time DESC
             LIMIT %s OFFSET %s

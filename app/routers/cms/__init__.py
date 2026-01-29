@@ -5,9 +5,10 @@ router = APIRouter(prefix="/api/cms")
 from . import (
     users, roles, permissions, packages, products,
     memberships, checkins, classes, trainers, pt,
-    transactions, subscriptions, reports
+    transactions, subscriptions, reports, branches
 )
 
+router.include_router(branches.router)
 router.include_router(users.router)
 router.include_router(roles.router)
 router.include_router(permissions.router)

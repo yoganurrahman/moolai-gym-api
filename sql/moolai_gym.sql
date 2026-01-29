@@ -19,17 +19,24 @@
                         MOOLAI GYM DATABASE SCHEMA
 ================================================================================
 
-Database ini dirancang untuk sistem manajemen gym yang mencakup:
+Database ini dirancang untuk sistem manajemen gym MULTI-CABANG yang mencakup:
+- Branch Management (Multi-Cabang)
 - Authentication & User Management
-- Membership Management
-- Check-in System
-- Personal Training (PT)
-- Class Management
-- Products & POS
-- Transactions
+- Membership Management (berlaku di semua cabang)
+- Check-in System (per cabang)
+- Personal Training (PT) (per cabang)
+- Class Management (per cabang)
+- Products & POS (stock per cabang)
+- Transactions (per cabang)
 - Subscriptions (Recurring Billing)
 - Promos & Vouchers
 - Notifications
+
+MULTI-BRANCH RULES:
+- Membership berlaku di SEMUA cabang
+- Trainer bisa pindah-pindah antar cabang
+- Penawaran (paket, harga, class type) SAMA di setiap cabang
+- Setiap aktivitas operasional dicatat di cabang mana
 
 ================================================================================
                             ENTITY RELATIONSHIP DIAGRAM
@@ -78,6 +85,52 @@ Database ini dirancang untuk sistem manajemen gym yang mencakup:
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
+
+-- ============================================================================
+-- BRANCHES (MULTI-CABANG)
+-- ============================================================================
+
+-- ----------------------------
+-- Table: branches
+-- ----------------------------
+-- FUNGSI: Menyimpan daftar cabang/lokasi gym
+-- RELASI:
+--   - ONE-TO-MANY ke semua tabel operasional (checkins, schedules, bookings, transactions)
+--   - ONE-TO-MANY ke trainer_branches (trainer assignment)
+--   - ONE-TO-MANY ke branch_product_stock (stock per cabang)
+-- FITUR:
+--   - code: Kode unik cabang untuk ID di transaction code (JKT, TNG, BDG)
+--   - opening_time/closing_time: Jam operasional per cabang
+--   - sort_order: Urutan tampilan di UI
+-- ----------------------------
+DROP TABLE IF EXISTS `branches`;
+CREATE TABLE `branches` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `code` varchar(20) NOT NULL COMMENT 'Kode unik cabang (JKT, TNG, BDG)',
+  `name` varchar(100) NOT NULL COMMENT 'Nama cabang',
+  `address` text DEFAULT NULL,
+  `city` varchar(100) DEFAULT NULL,
+  `province` varchar(100) DEFAULT NULL,
+  `phone` varchar(20) DEFAULT NULL,
+  `email` varchar(100) DEFAULT NULL,
+  `timezone` varchar(50) DEFAULT 'Asia/Jakarta',
+  `opening_time` time DEFAULT '06:00:00',
+  `closing_time` time DEFAULT '22:00:00',
+  `is_active` tinyint(1) DEFAULT 1,
+  `sort_order` int(11) DEFAULT 0,
+  `created_at` datetime DEFAULT current_timestamp(),
+  `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ----------------------------
+-- Records of branches
+-- ----------------------------
+INSERT INTO `branches` (`id`, `code`, `name`, `address`, `city`, `province`, `phone`, `email`, `opening_time`, `closing_time`, `sort_order`) VALUES
+(1, 'JKT', 'Moolai Gym Jakarta', 'Jl. Sudirman No. 100, Jakarta Pusat', 'Jakarta', 'DKI Jakarta', '021-1234567', 'jakarta@moolaigym.com', '06:00:00', '22:00:00', 1),
+(2, 'TNG', 'Moolai Gym Tangerang', 'Jl. BSD Raya No. 50, Tangerang Selatan', 'Tangerang', 'Banten', '021-7654321', 'tangerang@moolaigym.com', '06:00:00', '22:00:00', 2),
+(3, 'BDG', 'Moolai Gym Bandung', 'Jl. Dago No. 75, Bandung', 'Bandung', 'Jawa Barat', '022-1234567', 'bandung@moolaigym.com', '06:00:00', '21:00:00', 3);
 
 -- ============================================================================
 -- AUTH & USERS
@@ -195,7 +248,12 @@ INSERT INTO `permissions` (`id`, `name`, `description`) VALUES
 (43, 'promo.delete', 'Hapus promo'),
 -- Settings
 (44, 'settings.view', 'Lihat pengaturan'),
-(45, 'settings.update', 'Update pengaturan');
+(45, 'settings.update', 'Update pengaturan'),
+-- Branch Management
+(46, 'branch.view', 'Lihat daftar cabang'),
+(47, 'branch.create', 'Buat cabang baru'),
+(48, 'branch.update', 'Update cabang'),
+(49, 'branch.delete', 'Hapus cabang');
 
 -- ----------------------------
 -- Table: role_permissions
@@ -237,6 +295,7 @@ INSERT INTO `role_permissions` (`role_id`, `permission_id`) VALUES
 (1, 39),                            -- report.view
 (1, 40), (1, 41), (1, 42), (1, 43), -- promo.*
 (1, 44), (1, 45),                   -- settings.*
+(1, 46), (1, 47), (1, 48), (1, 49), -- branch.*
 
 -- ADMIN (role_id=2): Semua kecuali role & permission management
 (2, 1), (2, 2), (2, 3), (2, 4),     -- user.*
@@ -252,16 +311,19 @@ INSERT INTO `role_permissions` (`role_id`, `permission_id`) VALUES
 (2, 39),                            -- report.view
 (2, 40), (2, 41), (2, 42), (2, 43), -- promo.*
 (2, 44), (2, 45),                   -- settings.*
+(2, 46), (2, 48),                   -- branch.view, branch.update
 
 -- MEMBER (role_id=3): View only untuk beberapa modul
 (3, 17),                            -- package.view (lihat paket membership)
 (3, 25),                            -- class.view (lihat jadwal kelas)
+(3, 46),                            -- branch.view (lihat daftar cabang)
 
 -- TRAINER (role_id=4): Akses untuk trainer
 (4, 13),                            -- member.view (lihat member untuk PT)
 (4, 21), (4, 23),                   -- trainer.view, trainer.update (update profil & complete PT)
 (4, 25), (4, 27),                   -- class.view, class.update (untuk kelas yang diajar)
 (4, 37),                            -- checkin.view (lihat siapa yang check-in)
+(4, 46),                            -- branch.view (lihat daftar cabang)
 
 -- STAFF (role_id=5): Akses untuk kasir/front desk
 (5, 1),                             -- user.view
@@ -272,7 +334,8 @@ INSERT INTO `role_permissions` (`role_id`, `permission_id`) VALUES
 (5, 29), (5, 30),                   -- transaction.view, transaction.create
 (5, 33),                            -- product.view
 (5, 37), (5, 38),                   -- checkin.*
-(5, 40);                            -- promo.view
+(5, 40),                            -- promo.view
+(5, 46);                            -- branch.view
 
 -- ----------------------------
 -- Table: users
@@ -303,6 +366,7 @@ CREATE TABLE `users` (
   `gender` enum('male','female') DEFAULT NULL,
   `address` text DEFAULT NULL,
   `role_id` int(11) DEFAULT NULL,
+  `default_branch_id` int(11) DEFAULT NULL COMMENT 'Default cabang user (staff/admin untuk CMS, member untuk preferensi)',
   `is_active` tinyint(1) DEFAULT 1,
   -- PIN untuk verifikasi transaksi
   `pin` varchar(255) DEFAULT NULL,
@@ -320,18 +384,20 @@ CREATE TABLE `users` (
   UNIQUE KEY `email` (`email`),
   KEY `idx_users_email` (`email`),
   KEY `idx_users_role_id` (`role_id`),
-  CONSTRAINT `users_ibfk_1` FOREIGN KEY (`role_id`) REFERENCES `roles` (`id`) ON DELETE SET NULL
+  KEY `idx_users_branch` (`default_branch_id`),
+  CONSTRAINT `users_ibfk_1` FOREIGN KEY (`role_id`) REFERENCES `roles` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `users_branch_fk` FOREIGN KEY (`default_branch_id`) REFERENCES `branches` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------
 -- Records of users (default users, password: admin123, pin: 123456)
 -- ----------------------------
-INSERT INTO `users` (`id`, `name`, `email`, `password`, `pin`, `has_pin`, `phone`, `role_id`, `is_active`) VALUES
-(1, 'Super Admin', 'superadmin@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567890', 1, 1),
-(2, 'Admin Gym', 'admin@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567891', 2, 1),
-(3, 'Staff Kasir', 'staff@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567892', 5, 1),
-(4, 'Member User', 'member@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567893', 3, 1),
-(5, 'Coach Eko', 'trainer@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567894', 4, 1);
+INSERT INTO `users` (`id`, `name`, `email`, `password`, `pin`, `has_pin`, `phone`, `role_id`, `default_branch_id`, `is_active`) VALUES
+(1, 'Super Admin', 'superadmin@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567890', 1, 1, 1),
+(2, 'Admin Gym', 'admin@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567891', 2, 1, 1),
+(3, 'Staff Kasir', 'staff@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567892', 5, 1, 1),
+(4, 'Member User', 'member@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567893', 3, NULL, 1),
+(5, 'Coach Eko', 'trainer@moolaigym.com', '$2b$12$L.5z5PVoOyHKr2muErPwDeIaXVafAMp73Dq2aLtR67TXUgUODTd9u', '$2b$12$8y8T.vBbtUIM0jfiJQpZB.22q735D7xR.iDFjvAp2cVWT9oTq0tSO', 1, '081234567894', 4, NULL, 1);
 
 -- ----------------------------
 -- Table: otp_verifications
@@ -378,6 +444,7 @@ CREATE TABLE `otp_verifications` (
 DROP TABLE IF EXISTS `audit_logs`;
 CREATE TABLE `audit_logs` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) DEFAULT NULL COMMENT 'Cabang tempat aksi dilakukan',
   `table_name` varchar(100) DEFAULT NULL,
   `record_id` int(11) DEFAULT NULL,
   `action` enum('create','update','delete') DEFAULT NULL,
@@ -389,7 +456,9 @@ CREATE TABLE `audit_logs` (
   `created_at` datetime DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `idx_audit_table` (`table_name`, `record_id`),
-  KEY `idx_audit_user` (`user_id`)
+  KEY `idx_audit_user` (`user_id`),
+  KEY `idx_audit_branch` (`branch_id`),
+  CONSTRAINT `audit_logs_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ============================================================================
@@ -549,6 +618,7 @@ CREATE TABLE `member_memberships` (
 DROP TABLE IF EXISTS `member_checkins`;
 CREATE TABLE `member_checkins` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat check-in',
   `user_id` int(11) NOT NULL,
   -- Tipe akses
   `checkin_type` enum('gym','class_only') NOT NULL DEFAULT 'gym' COMMENT 'gym=akses penuh, class_only=hanya area kelas',
@@ -564,9 +634,11 @@ CREATE TABLE `member_checkins` (
   `notes` varchar(255) DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
+  KEY `idx_checkin_branch` (`branch_id`),
   KEY `idx_checkin_user` (`user_id`),
   KEY `idx_checkin_date` (`checkin_time`),
   KEY `idx_checkin_type` (`checkin_type`),
+  CONSTRAINT `member_checkins_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `member_checkins_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `member_checkins_ibfk_2` FOREIGN KEY (`membership_id`) REFERENCES `member_memberships` (`id`) ON DELETE SET NULL,
   CONSTRAINT `member_checkins_ibfk_3` FOREIGN KEY (`checked_in_by`) REFERENCES `users` (`id`) ON DELETE SET NULL,
@@ -616,6 +688,35 @@ CREATE TABLE `trainers` (
 -- ----------------------------
 INSERT INTO `trainers` (`user_id`, `specialization`, `bio`, `certifications`, `experience_years`, `rate_per_session`, `commission_percentage`) VALUES
 (5, 'Strength & Conditioning', 'Certified personal trainer dengan pengalaman 5 tahun di bidang strength training dan body transformation. Spesialis program fat loss dan muscle building.', '["ACE Certified Personal Trainer", "NASM Performance Enhancement Specialist", "First Aid & CPR Certified"]', 5, 250000.00, 30.00);
+
+-- ----------------------------
+-- Table: trainer_branches
+-- ----------------------------
+-- FUNGSI: Junction table untuk assignment trainer ke cabang
+-- RELASI:
+--   - MANY-TO-ONE ke trainers (trainer_id)
+--   - MANY-TO-ONE ke branches (branch_id)
+-- FITUR:
+--   - is_primary: Menandai cabang utama trainer
+--   - Trainer bisa assigned ke beberapa cabang sekaligus
+-- ----------------------------
+DROP TABLE IF EXISTS `trainer_branches`;
+CREATE TABLE `trainer_branches` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `trainer_id` int(11) NOT NULL,
+  `branch_id` int(11) NOT NULL,
+  `is_primary` tinyint(1) DEFAULT 0 COMMENT 'Cabang utama trainer',
+  `created_at` datetime DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_trainer_branch` (`trainer_id`, `branch_id`),
+  KEY `idx_branch_trainers` (`branch_id`),
+  CONSTRAINT `trainer_branches_ibfk_1` FOREIGN KEY (`trainer_id`) REFERENCES `trainers` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `trainer_branches_ibfk_2` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ----------------------------
+-- Records of trainer_branches (assigned setelah trainer tambahan dibuat di sample data)
+-- ----------------------------
 
 -- ----------------------------
 -- Table: pt_packages
@@ -721,6 +822,7 @@ CREATE TABLE `member_pt_sessions` (
 DROP TABLE IF EXISTS `pt_bookings`;
 CREATE TABLE `pt_bookings` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat PT session',
   `member_pt_session_id` int(11) NOT NULL,
   `user_id` int(11) NOT NULL,
   `trainer_id` int(11) NOT NULL,
@@ -736,8 +838,10 @@ CREATE TABLE `pt_bookings` (
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
+  KEY `idx_pt_booking_branch` (`branch_id`),
   KEY `idx_pt_booking_date` (`booking_date`),
   KEY `idx_pt_booking_trainer` (`trainer_id`, `booking_date`),
+  CONSTRAINT `pt_bookings_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `pt_bookings_ibfk_1` FOREIGN KEY (`member_pt_session_id`) REFERENCES `member_pt_sessions` (`id`),
   CONSTRAINT `pt_bookings_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `pt_bookings_ibfk_3` FOREIGN KEY (`trainer_id`) REFERENCES `trainers` (`id`)
@@ -811,6 +915,7 @@ INSERT INTO `class_types` (`name`, `description`, `default_duration`, `default_c
 DROP TABLE IF EXISTS `class_schedules`;
 CREATE TABLE `class_schedules` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat kelas diadakan',
   `class_type_id` int(11) NOT NULL,
   `trainer_id` int(11) DEFAULT NULL,
   `name` varchar(100) DEFAULT NULL COMMENT 'Override nama kelas',
@@ -825,7 +930,9 @@ CREATE TABLE `class_schedules` (
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
+  KEY `idx_schedule_branch` (`branch_id`),
   KEY `idx_schedule_day` (`day_of_week`, `start_time`),
+  CONSTRAINT `class_schedules_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `class_schedules_ibfk_1` FOREIGN KEY (`class_type_id`) REFERENCES `class_types` (`id`),
   CONSTRAINT `class_schedules_ibfk_2` FOREIGN KEY (`trainer_id`) REFERENCES `trainers` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -833,15 +940,15 @@ CREATE TABLE `class_schedules` (
 -- ----------------------------
 -- Records of class_schedules
 -- ----------------------------
--- Jadwal kelas (schedule_id = urutan insert)
-INSERT INTO `class_schedules` (`class_type_id`, `trainer_id`, `day_of_week`, `start_time`, `end_time`, `capacity`, `room`) VALUES
-(1, 1, 1, '07:00:00', '08:00:00', 20, 'Studio A'),  -- id=1: Yoga Monday
-(1, 1, 3, '07:00:00', '08:00:00', 20, 'Studio A'),  -- id=2: Yoga Wednesday
-(2, 1, 2, '18:00:00', '18:45:00', 15, 'Spinning Room'),  -- id=3: Spinning Tuesday
-(2, 1, 4, '18:00:00', '18:45:00', 15, 'Spinning Room'),  -- id=4: Spinning Thursday
-(3, 1, 6, '09:00:00', '10:00:00', 25, 'Studio B'),  -- id=5: Zumba Saturday
-(4, 2, 1, '18:00:00', '19:00:00', 15, 'Studio A'),  -- id=6: Pilates Monday (Coach Maya)
-(4, 2, 2, '09:00:00', '10:00:00', 15, 'Studio A');  -- id=7: Pilates Tuesday (Coach Maya)
+-- Jadwal kelas Jakarta (schedule_id = urutan insert)
+INSERT INTO `class_schedules` (`branch_id`, `class_type_id`, `trainer_id`, `day_of_week`, `start_time`, `end_time`, `capacity`, `room`) VALUES
+(1, 1, 1, 1, '07:00:00', '08:00:00', 20, 'Studio A'),  -- id=1: Yoga Monday @JKT
+(1, 1, 1, 3, '07:00:00', '08:00:00', 20, 'Studio A'),  -- id=2: Yoga Wednesday @JKT
+(1, 2, 1, 2, '18:00:00', '18:45:00', 15, 'Spinning Room'),  -- id=3: Spinning Tuesday @JKT
+(1, 2, 1, 4, '18:00:00', '18:45:00', 15, 'Spinning Room'),  -- id=4: Spinning Thursday @JKT
+(1, 3, 1, 6, '09:00:00', '10:00:00', 25, 'Studio B'),  -- id=5: Zumba Saturday @JKT
+(1, 4, 2, 1, '18:00:00', '19:00:00', 15, 'Studio A'),  -- id=6: Pilates Monday @JKT (Coach Maya)
+(1, 4, 2, 2, '09:00:00', '10:00:00', 15, 'Studio A');  -- id=7: Pilates Tuesday @JKT (Coach Maya)
 
 -- ----------------------------
 -- Table: class_bookings
@@ -894,6 +1001,7 @@ INSERT INTO `class_schedules` (`class_type_id`, `trainer_id`, `day_of_week`, `st
 DROP TABLE IF EXISTS `class_bookings`;
 CREATE TABLE `class_bookings` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat kelas',
   `user_id` int(11) NOT NULL,
   `schedule_id` int(11) NOT NULL,
   `class_date` date NOT NULL COMMENT 'Tanggal kelas yang di-booking',
@@ -913,9 +1021,11 @@ CREATE TABLE `class_bookings` (
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `unique_booking` (`user_id`, `schedule_id`, `class_date`),
+  KEY `idx_class_booking_branch` (`branch_id`),
   KEY `idx_class_booking_date` (`class_date`),
   KEY `idx_class_booking_membership` (`membership_id`),
   KEY `idx_class_booking_class_pass` (`class_pass_id`),
+  CONSTRAINT `class_bookings_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `class_bookings_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `class_bookings_ibfk_2` FOREIGN KEY (`schedule_id`) REFERENCES `class_schedules` (`id`),
   CONSTRAINT `class_bookings_ibfk_3` FOREIGN KEY (`membership_id`) REFERENCES `member_memberships` (`id`) ON DELETE SET NULL,
@@ -1109,6 +1219,7 @@ INSERT INTO `products` (`category_id`, `sku`, `name`, `description`, `price`, `c
 DROP TABLE IF EXISTS `product_stock_logs`;
 CREATE TABLE `product_stock_logs` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat perubahan stock',
   `product_id` int(11) NOT NULL,
   `type` enum('in','out','adjustment') NOT NULL,
   `quantity` int(11) NOT NULL,
@@ -1120,9 +1231,37 @@ CREATE TABLE `product_stock_logs` (
   `created_by` int(11) DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
+  KEY `idx_stock_log_branch` (`branch_id`),
   KEY `idx_stock_log_product` (`product_id`),
+  CONSTRAINT `product_stock_logs_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `product_stock_logs_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE,
   CONSTRAINT `product_stock_logs_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ----------------------------
+-- Table: branch_product_stock
+-- ----------------------------
+-- FUNGSI: Menyimpan stock produk per cabang
+-- RELASI:
+--   - MANY-TO-ONE ke branches (branch_id)
+--   - MANY-TO-ONE ke products (product_id)
+-- FITUR:
+--   - Katalog produk global, stock per cabang
+--   - min_stock: Batas minimum stock per cabang
+-- ----------------------------
+DROP TABLE IF EXISTS `branch_product_stock`;
+CREATE TABLE `branch_product_stock` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL,
+  `product_id` int(11) NOT NULL,
+  `stock` int(11) NOT NULL DEFAULT 0,
+  `min_stock` int(11) DEFAULT 5,
+  `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_branch_product` (`branch_id`, `product_id`),
+  KEY `idx_product_stock` (`product_id`),
+  CONSTRAINT `branch_product_stock_ibfk_1` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `branch_product_stock_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ============================================================================
@@ -1164,6 +1303,7 @@ CREATE TABLE `product_stock_logs` (
 DROP TABLE IF EXISTS `transactions`;
 CREATE TABLE `transactions` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat transaksi',
   `transaction_code` varchar(50) NOT NULL,
   `user_id` int(11) DEFAULT NULL COMMENT 'Member yang beli (NULL untuk walk-in)',
   `staff_id` int(11) DEFAULT NULL COMMENT 'Kasir/staff',
@@ -1195,9 +1335,11 @@ CREATE TABLE `transactions` (
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `transaction_code` (`transaction_code`),
+  KEY `idx_transaction_branch` (`branch_id`),
   KEY `idx_transaction_user` (`user_id`),
   KEY `idx_transaction_date` (`created_at`),
   KEY `idx_transaction_status` (`payment_status`),
+  CONSTRAINT `transactions_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `transactions_ibfk_2` FOREIGN KEY (`staff_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -1370,6 +1512,7 @@ CREATE TABLE `subscriptions` (
 DROP TABLE IF EXISTS `subscription_invoices`;
 CREATE TABLE `subscription_invoices` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) DEFAULT NULL COMMENT 'Cabang yang generate invoice',
   `subscription_id` int(11) NOT NULL,
   `transaction_id` int(11) DEFAULT NULL COMMENT 'FK ke transactions jika sudah bayar',
   `invoice_number` varchar(50) NOT NULL,
@@ -1386,8 +1529,10 @@ CREATE TABLE `subscription_invoices` (
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `invoice_number` (`invoice_number`),
+  KEY `idx_sub_invoice_branch` (`branch_id`),
   KEY `idx_subscription_invoice` (`subscription_id`),
   KEY `idx_invoice_due_date` (`due_date`, `status`),
+  CONSTRAINT `subscription_invoices_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`) ON DELETE SET NULL,
   CONSTRAINT `subscription_invoices_ibfk_1` FOREIGN KEY (`subscription_id`) REFERENCES `subscriptions` (`id`) ON DELETE CASCADE,
   CONSTRAINT `subscription_invoices_ibfk_2` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -1601,6 +1746,7 @@ INSERT INTO `settings` (`key`, `value`, `type`, `description`) VALUES
 DROP TABLE IF EXISTS `notifications`;
 CREATE TABLE `notifications` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `branch_id` int(11) DEFAULT NULL COMMENT 'Cabang terkait notifikasi',
   `user_id` int(11) NOT NULL,
   `type` enum('info','success','warning','error','promo','reminder','billing') NOT NULL DEFAULT 'info',
   `title` varchar(100) NOT NULL,
@@ -1610,7 +1756,9 @@ CREATE TABLE `notifications` (
   `read_at` datetime DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
+  KEY `idx_notification_branch` (`branch_id`),
   KEY `idx_notification_user` (`user_id`, `is_read`),
+  CONSTRAINT `notifications_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`) ON DELETE SET NULL,
   CONSTRAINT `notifications_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -1677,18 +1825,18 @@ INSERT INTO `trainers` (`id`, `user_id`, `specialization`, `bio`, `certification
 UPDATE `class_schedules` SET `trainer_id` = 1 WHERE `trainer_id` = 1;
 
 -- Tambah jadwal dengan trainer Maya
-INSERT INTO `class_schedules` (`class_type_id`, `trainer_id`, `day_of_week`, `start_time`, `end_time`, `capacity`, `room`) VALUES
-(1, 2, 5, '07:00:00', '08:00:00', 20, 'Studio A'),  -- Yoga Friday with Maya
-(4, 2, 2, '09:00:00', '10:00:00', 15, 'Studio A'),  -- Pilates Tuesday with Maya
-(4, 2, 4, '09:00:00', '10:00:00', 15, 'Studio A');  -- Pilates Thursday with Maya
+INSERT INTO `class_schedules` (`branch_id`, `class_type_id`, `trainer_id`, `day_of_week`, `start_time`, `end_time`, `capacity`, `room`) VALUES
+(1, 1, 2, 5, '07:00:00', '08:00:00', 20, 'Studio A'),  -- Yoga Friday with Maya @JKT
+(1, 4, 2, 2, '09:00:00', '10:00:00', 15, 'Studio A'),  -- Pilates Tuesday with Maya @JKT
+(1, 4, 2, 4, '09:00:00', '10:00:00', 15, 'Studio A');  -- Pilates Thursday with Maya @JKT
 
 -- ============================================================================
 -- SKENARIO 1: Member Budi Santoso - Premium Monthly
 -- ============================================================================
 
 -- Transaksi pembelian membership Premium Monthly
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
-(1, 'TRX-20260115-0001', 6, 3, 500000.00, 500000.00, 11, 55000.00, 555000.00, 'qris', 'paid', 555000.00, 0, '2026-01-15 10:30:00', '2026-01-15 10:30:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
+(1, 1, 'TRX-20260115-0001', 6, 3, 500000.00, 500000.00, 11, 55000.00, 555000.00, 'qris', 'paid', 555000.00, 0, '2026-01-15 10:30:00', '2026-01-15 10:30:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (1, 'membership', 4, 'Premium Monthly', 1, 500000.00, 500000.00, '2026-01-15 10:30:00');
@@ -1699,34 +1847,34 @@ INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `transaction_id
 
 -- Check-in records Budi (beberapa kali dalam seminggu)
 -- checkin_type='gym' karena punya Premium Monthly membership (akses penuh)
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
-(6, 'gym', 1, NULL, '2026-01-15 17:00:00', '2026-01-15 18:30:00', 'qr_code', '2026-01-15 17:00:00'),
-(6, 'gym', 1, NULL, '2026-01-17 06:30:00', '2026-01-17 08:00:00', 'qr_code', '2026-01-17 06:30:00'),
-(6, 'gym', 1, NULL, '2026-01-19 18:00:00', '2026-01-19 19:45:00', 'qr_code', '2026-01-19 18:00:00'),
-(6, 'gym', 1, NULL, '2026-01-21 07:00:00', '2026-01-21 08:30:00', 'qr_code', '2026-01-21 07:00:00'),
-(6, 'gym', 1, NULL, '2026-01-23 17:30:00', '2026-01-23 19:00:00', 'qr_code', '2026-01-23 17:30:00'),
-(6, 'gym', 1, NULL, '2026-01-25 09:00:00', '2026-01-25 10:30:00', 'qr_code', '2026-01-25 09:00:00'),
-(6, 'gym', 1, NULL, '2026-01-27 18:00:00', NULL, 'qr_code', '2026-01-27 18:00:00');  -- Masih di gym
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
+(1, 6, 'gym', 1, NULL, '2026-01-15 17:00:00', '2026-01-15 18:30:00', 'qr_code', '2026-01-15 17:00:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-17 06:30:00', '2026-01-17 08:00:00', 'qr_code', '2026-01-17 06:30:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-19 18:00:00', '2026-01-19 19:45:00', 'qr_code', '2026-01-19 18:00:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-21 07:00:00', '2026-01-21 08:30:00', 'qr_code', '2026-01-21 07:00:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-23 17:30:00', '2026-01-23 19:00:00', 'qr_code', '2026-01-23 17:30:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-25 09:00:00', '2026-01-25 10:30:00', 'qr_code', '2026-01-25 09:00:00'),
+(1, 6, 'gym', 1, NULL, '2026-01-27 18:00:00', NULL, 'qr_code', '2026-01-27 18:00:00');  -- Masih di gym
 
 -- Booking kelas Budi (Premium Monthly: include_classes=1, membership_id=1)
 -- access_type='membership' karena pakai benefit dari membership Premium
-INSERT INTO `class_bookings` (`user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
-(6, 1, '2026-01-20', 'membership', 1, NULL, 'attended', '2026-01-18 20:00:00', '2026-01-20 07:00:00', 'Premium Member - FREE class', '2026-01-18 20:00:00'),
-(6, 3, '2026-01-22', 'membership', 1, NULL, 'booked', '2026-01-20 19:00:00', NULL, 'Premium Member - FREE class', '2026-01-20 19:00:00'),
-(6, 1, '2026-01-27', 'membership', 1, NULL, 'booked', '2026-01-25 21:00:00', NULL, 'Premium Member - FREE class', '2026-01-25 21:00:00');
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+(1, 6, 1, '2026-01-20', 'membership', 1, NULL, 'attended', '2026-01-18 20:00:00', '2026-01-20 07:00:00', 'Premium Member - FREE class', '2026-01-18 20:00:00'),
+(1, 6, 3, '2026-01-22', 'membership', 1, NULL, 'booked', '2026-01-20 19:00:00', NULL, 'Premium Member - FREE class', '2026-01-20 19:00:00'),
+(1, 6, 1, '2026-01-27', 'membership', 1, NULL, 'booked', '2026-01-25 21:00:00', NULL, 'Premium Member - FREE class', '2026-01-25 21:00:00');
 
 -- Transaksi beli produk (Protein Shake + Energy Bar)
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
-(2, 'TRX-20260121-0002', 6, 3, 60000.00, 60000.00, 11, 6600.00, 66600.00, 'cash', 'paid', 70000.00, 3400.00, '2026-01-21 08:15:00', '2026-01-21 08:15:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
+(2, 1, 'TRX-20260121-0002', 6, 3, 60000.00, 60000.00, 11, 6600.00, 66600.00, 'cash', 'paid', 70000.00, 3400.00, '2026-01-21 08:15:00', '2026-01-21 08:15:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (2, 'product', 3, 'Protein Shake', 1, 35000.00, 35000.00, '2026-01-21 08:15:00'),
 (2, 'product', 5, 'Energy Bar', 1, 25000.00, 25000.00, '2026-01-21 08:15:00');
 
 -- Update stock produk setelah penjualan (21 Jan 2026 - setelah pembelian Siti 5 Jan)
-INSERT INTO `product_stock_logs` (`product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
-(3, 'out', 1, 50, 49, 'transaction', 2, 'Penjualan ke Budi Santoso', 3, '2026-01-21 08:15:00'),
-(5, 'out', 1, 39, 38, 'transaction', 2, 'Penjualan ke Budi Santoso', 3, '2026-01-21 08:15:00');
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 3, 'out', 1, 50, 49, 'transaction', 2, 'Penjualan ke Budi Santoso', 3, '2026-01-21 08:15:00'),
+(1, 5, 'out', 1, 39, 38, 'transaction', 2, 'Penjualan ke Budi Santoso', 3, '2026-01-21 08:15:00');
 
 UPDATE `products` SET `stock` = 49 WHERE `id` = 3;
 UPDATE `products` SET `stock` = 38 WHERE `id` = 5;
@@ -1737,8 +1885,8 @@ UPDATE `products` SET `stock` = 38 WHERE `id` = 5;
 
 -- ===== SEBELUM JADI MEMBER: Visit sekali dengan Daily Pass (25 Desember 2025) =====
 -- Transaksi pembelian Daily Pass (sebelum jadi member VIP)
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
-(8, 'TRX-20251225-0008', 7, 3, 50000.00, 50000.00, 11, 5500.00, 55500.00, 'cash', 'paid', 60000.00, '2025-12-25 09:00:00', '2025-12-25 09:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
+(8, 1, 'TRX-20251225-0008', 7, 3, 50000.00, 50000.00, 11, 5500.00, 55500.00, 'cash', 'paid', 60000.00, '2025-12-25 09:00:00', '2025-12-25 09:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (8, 'membership', 1, 'Daily Pass', 1, 50000.00, 50000.00, '2025-12-25 09:00:00');
@@ -1749,13 +1897,13 @@ INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `transaction_id
 
 -- Check-in saat Daily Pass (pertama kali ke gym)
 -- checkin_type='gym' karena Daily Pass adalah membership (walaupun 1 hari)
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
-(7, 'gym', 6, NULL, '2025-12-25 09:30:00', '2025-12-25 11:00:00', 'manual', 'First visit - trial Daily Pass', '2025-12-25 09:30:00');
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(1, 7, 'gym', 6, NULL, '2025-12-25 09:30:00', '2025-12-25 11:00:00', 'manual', 'First visit - trial Daily Pass', '2025-12-25 09:30:00');
 
 -- ===== SEKARANG JADI MEMBER VIP (1 Januari 2026) =====
 -- Transaksi pembelian VIP Monthly
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
-(3, 'TRX-20260101-0003', 7, 2, 1000000.00, 1000000.00, 11, 110000.00, 1110000.00, 'transfer', 'paid', 1110000.00, '2026-01-01 14:00:00', '2026-01-01 14:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
+(3, 1, 'TRX-20260101-0003', 7, 2, 1000000.00, 1000000.00, 11, 110000.00, 1110000.00, 'transfer', 'paid', 1110000.00, '2026-01-01 14:00:00', '2026-01-01 14:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (3, 'membership', 5, 'VIP Monthly', 1, 1000000.00, 1000000.00, '2026-01-01 14:00:00');
@@ -1765,8 +1913,8 @@ INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `transaction_id
 (2, 7, 5, 3, 'MBR-20260101-SIT001', '2026-01-01', '2026-01-31', NULL, 'active', 1, '2026-01-01 14:00:00');
 
 -- Transaksi pembelian PT 10 Sessions
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
-(4, 'TRX-20260102-0004', 7, 2, 2000000.00, 2000000.00, 11, 220000.00, 2220000.00, 'card', 'paid', 2220000.00, '2026-01-02 15:00:00', '2026-01-02 15:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
+(4, 1, 'TRX-20260102-0004', 7, 2, 2000000.00, 2000000.00, 11, 220000.00, 2220000.00, 'card', 'paid', 2220000.00, '2026-01-02 15:00:00', '2026-01-02 15:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `metadata`, `created_at`) VALUES
 (4, 'pt_package', 3, 'PT 10 Sessions', 1, 2000000.00, 2000000.00, '{"trainer_id": 1, "trainer_name": "Coach Eko"}', '2026-01-02 15:00:00');
@@ -1776,24 +1924,24 @@ INSERT INTO `member_pt_sessions` (`id`, `user_id`, `pt_package_id`, `transaction
 (1, 7, 3, 4, 1, 10, 3, '2026-01-02', '2026-04-02', 'active', '2026-01-02 15:00:00');
 
 -- PT Bookings (3 session sudah selesai)
-INSERT INTO `pt_bookings` (`member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `completed_at`, `completed_by`, `created_at`) VALUES
-(1, 7, 1, '2026-01-05', '10:00:00', '11:00:00', 'completed', 'Session 1: Fitness assessment & goal setting', '2026-01-05 11:00:00', 5, '2026-01-03 14:00:00'),
-(1, 7, 1, '2026-01-12', '10:00:00', '11:00:00', 'completed', 'Session 2: Upper body workout', '2026-01-12 11:00:00', 5, '2026-01-08 10:00:00'),
-(1, 7, 1, '2026-01-19', '10:00:00', '11:00:00', 'completed', 'Session 3: Lower body & core workout', '2026-01-19 11:00:00', 5, '2026-01-15 09:00:00'),
-(1, 7, 1, '2026-01-26', '10:00:00', '11:00:00', 'booked', 'Session 4: Cardio & HIIT', NULL, NULL, '2026-01-22 16:00:00'),
-(1, 7, 1, '2026-02-02', '10:00:00', '11:00:00', 'booked', 'Session 5: Full body workout', NULL, NULL, '2026-01-22 16:00:00');
+INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `completed_at`, `completed_by`, `created_at`) VALUES
+(1, 1, 7, 1, '2026-01-05', '10:00:00', '11:00:00', 'completed', 'Session 1: Fitness assessment & goal setting', '2026-01-05 11:00:00', 5, '2026-01-03 14:00:00'),
+(1, 1, 7, 1, '2026-01-12', '10:00:00', '11:00:00', 'completed', 'Session 2: Upper body workout', '2026-01-12 11:00:00', 5, '2026-01-08 10:00:00'),
+(1, 1, 7, 1, '2026-01-19', '10:00:00', '11:00:00', 'completed', 'Session 3: Lower body & core workout', '2026-01-19 11:00:00', 5, '2026-01-15 09:00:00'),
+(1, 1, 7, 1, '2026-01-26', '10:00:00', '11:00:00', 'booked', 'Session 4: Cardio & HIIT', NULL, NULL, '2026-01-22 16:00:00'),
+(1, 1, 7, 1, '2026-02-02', '10:00:00', '11:00:00', 'booked', 'Session 5: Full body workout', NULL, NULL, '2026-01-22 16:00:00');
 
 -- Check-in records Siti (VIP member - akses penuh gym + semua fasilitas)
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
-(7, 'gym', 2, NULL, '2026-01-05 09:30:00', '2026-01-05 11:30:00', 'qr_code', '2026-01-05 09:30:00'),  -- PT Day + beli produk
-(7, 'gym', 2, NULL, '2026-01-06 06:30:00', '2026-01-06 08:00:00', 'qr_code', '2026-01-06 06:30:00'),  -- Yoga class
-(7, 'gym', 2, NULL, '2026-01-08 07:00:00', '2026-01-08 08:30:00', 'qr_code', '2026-01-08 07:00:00'),  -- Regular gym
-(7, 'gym', 2, NULL, '2026-01-12 09:30:00', '2026-01-12 11:30:00', 'qr_code', '2026-01-12 09:30:00'),  -- PT Day
-(7, 'gym', 2, NULL, '2026-01-15 18:00:00', '2026-01-15 19:30:00', 'qr_code', '2026-01-15 18:00:00'),  -- Evening workout
-(7, 'gym', 2, NULL, '2026-01-19 09:30:00', '2026-01-19 12:00:00', 'qr_code', '2026-01-19 09:30:00'),  -- PT Day + Swim
-(7, 'gym', 2, NULL, '2026-01-22 17:00:00', '2026-01-22 19:00:00', 'qr_code', '2026-01-22 17:00:00'),  -- Evening workout
-(7, 'gym', 2, NULL, '2026-01-25 08:30:00', '2026-01-25 10:30:00', 'qr_code', '2026-01-25 08:30:00'),  -- Zumba class + teman Diana
-(7, 'gym', 2, NULL, '2026-01-26 09:00:00', NULL, 'qr_code', '2026-01-26 09:00:00');  -- Masih di gym (PT Day)
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
+(1, 7, 'gym', 2, NULL, '2026-01-05 09:30:00', '2026-01-05 11:30:00', 'qr_code', '2026-01-05 09:30:00'),  -- PT Day + beli produk
+(1, 7, 'gym', 2, NULL, '2026-01-06 06:30:00', '2026-01-06 08:00:00', 'qr_code', '2026-01-06 06:30:00'),  -- Yoga class
+(1, 7, 'gym', 2, NULL, '2026-01-08 07:00:00', '2026-01-08 08:30:00', 'qr_code', '2026-01-08 07:00:00'),  -- Regular gym
+(1, 7, 'gym', 2, NULL, '2026-01-12 09:30:00', '2026-01-12 11:30:00', 'qr_code', '2026-01-12 09:30:00'),  -- PT Day
+(1, 7, 'gym', 2, NULL, '2026-01-15 18:00:00', '2026-01-15 19:30:00', 'qr_code', '2026-01-15 18:00:00'),  -- Evening workout
+(1, 7, 'gym', 2, NULL, '2026-01-19 09:30:00', '2026-01-19 12:00:00', 'qr_code', '2026-01-19 09:30:00'),  -- PT Day + Swim
+(1, 7, 'gym', 2, NULL, '2026-01-22 17:00:00', '2026-01-22 19:00:00', 'qr_code', '2026-01-22 17:00:00'),  -- Evening workout
+(1, 7, 'gym', 2, NULL, '2026-01-25 08:30:00', '2026-01-25 10:30:00', 'qr_code', '2026-01-25 08:30:00'),  -- Zumba class + teman Diana
+(1, 7, 'gym', 2, NULL, '2026-01-26 09:00:00', NULL, 'qr_code', '2026-01-26 09:00:00');  -- Masih di gym (PT Day)
 
 -- Payment method tersimpan untuk subscription
 INSERT INTO `payment_methods` (`id`, `user_id`, `type`, `provider`, `masked_number`, `holder_name`, `token`, `is_default`, `expires_at`, `created_at`) VALUES
@@ -1804,22 +1952,22 @@ INSERT INTO `subscriptions` (`id`, `subscription_code`, `user_id`, `item_type`, 
 (1, 'SUB-20260101-0001', 7, 'membership', 5, 'VIP Monthly', 1000000.00, 1110000.00, 'monthly', 1, '2026-02-01', 1, 'active', '2026-01-01 14:00:00', '2026-01-01 14:00:00');
 
 -- ===== PEMBELIAN PRODUK: Mineral Water + Energy Bar (setelah PT session) =====
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
-(9, 'TRX-20260105-0009', 7, 3, 33000.00, 33000.00, 11, 3630.00, 36630.00, 'cash', 'paid', 40000.00, 3370.00, '2026-01-05 11:15:00', '2026-01-05 11:15:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
+(9, 1, 'TRX-20260105-0009', 7, 3, 33000.00, 33000.00, 11, 3630.00, 36630.00, 'cash', 'paid', 40000.00, 3370.00, '2026-01-05 11:15:00', '2026-01-05 11:15:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (9, 'product', 4, 'Mineral Water 600ml', 1, 8000.00, 8000.00, '2026-01-05 11:15:00'),
 (9, 'product', 5, 'Energy Bar', 1, 25000.00, 25000.00, '2026-01-05 11:15:00');
 
 -- Update stock produk (5 Jan 2026 - sebelum transaksi lain)
-INSERT INTO `product_stock_logs` (`product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
-(4, 'out', 1, 100, 99, 'transaction', 9, 'Penjualan ke Siti Rahayu', 3, '2026-01-05 11:15:00'),
-(5, 'out', 1, 40, 39, 'transaction', 9, 'Penjualan ke Siti Rahayu', 3, '2026-01-05 11:15:00');
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 4, 'out', 1, 100, 99, 'transaction', 9, 'Penjualan ke Siti Rahayu', 3, '2026-01-05 11:15:00'),
+(1, 5, 'out', 1, 40, 39, 'transaction', 9, 'Penjualan ke Siti Rahayu', 3, '2026-01-05 11:15:00');
 
 -- ===== PEMBELIAN SINGLE CLASS: Zumba (ajak teman yang non-member) =====
 -- Siti beli Single Class untuk temannya yang belum member
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `notes`, `created_at`) VALUES
-(10, 'TRX-20260118-0010', 7, 3, 50000.00, 50000.00, 11, 5500.00, 55500.00, 'qris', 'paid', 55500.00, '2026-01-18 10:00:00', 'Single Class untuk teman (non-member)', '2026-01-18 10:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `notes`, `created_at`) VALUES
+(10, 1, 'TRX-20260118-0010', 7, 3, 50000.00, 50000.00, 11, 5500.00, 55500.00, 'qris', 'paid', 55500.00, '2026-01-18 10:00:00', 'Single Class untuk teman (non-member)', '2026-01-18 10:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `metadata`, `created_at`) VALUES
 (10, 'class_pass', 1, 'Single Class', 1, 50000.00, 50000.00, '{"class_type": "Zumba", "class_date": "2026-01-25", "for_guest": true, "guest_name": "Diana (teman Siti)"}', '2026-01-18 10:00:00');
@@ -1832,13 +1980,13 @@ INSERT INTO `member_class_passes` (`id`, `user_id`, `class_package_id`, `transac
 -- Siti adalah VIP Member (membership_id=2) yang punya akses GRATIS ke SEMUA kelas tanpa batas
 -- access_type='membership' dengan membership_id=2 (VIP Monthly)
 -- Tapi untuk teman Diana yang non-member, Siti belikan Single Class (class_pass_id=2)
-INSERT INTO `class_bookings` (`user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
 -- Siti ikut Yoga (6 Jan) - GRATIS karena VIP include_classes=1
-(7, 1, '2026-01-06', 'membership', 2, NULL, 'attended', '2026-01-04 20:00:00', '2026-01-06 07:00:00', 'VIP Member - FREE class', '2026-01-04 20:00:00'),
+(1, 7, 1, '2026-01-06', 'membership', 2, NULL, 'attended', '2026-01-04 20:00:00', '2026-01-06 07:00:00', 'VIP Member - FREE class', '2026-01-04 20:00:00'),
 -- Siti ikut Zumba (25 Jan) - GRATIS karena VIP
-(7, 5, '2026-01-25', 'membership', 2, NULL, 'attended', '2026-01-18 10:30:00', '2026-01-25 09:00:00', 'VIP Member - FREE class, bareng teman Diana', '2026-01-18 10:30:00'),
+(1, 7, 5, '2026-01-25', 'membership', 2, NULL, 'attended', '2026-01-18 10:30:00', '2026-01-25 09:00:00', 'VIP Member - FREE class, bareng teman Diana', '2026-01-18 10:30:00'),
 -- Siti booking Pilates (upcoming) - GRATIS karena VIP
-(7, 7, '2026-01-28', 'membership', 2, NULL, 'booked', '2026-01-26 19:00:00', NULL, 'VIP Member - FREE class', '2026-01-26 19:00:00');
+(1, 7, 7, '2026-01-28', 'membership', 2, NULL, 'booked', '2026-01-26 19:00:00', NULL, 'VIP Member - FREE class', '2026-01-26 19:00:00');
 
 -- Note: Teman Diana (non-member) ikut kelas Zumba pakai Single Class yang DIBELI oleh Siti
 -- Booking untuk Diana menggunakan class_pass_id=2 (Single Class)
@@ -1849,8 +1997,8 @@ INSERT INTO `class_bookings` (`user_id`, `schedule_id`, `class_date`, `access_ty
 -- ============================================================================
 
 -- Transaksi pembelian Basic Monthly
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
-(5, 'TRX-20260110-0005', 8, 3, 300000.00, 300000.00, 11, 33000.00, 333000.00, 'ewallet', 'paid', 333000.00, '2026-01-10 11:00:00', '2026-01-10 11:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
+(5, 1, 'TRX-20260110-0005', 8, 3, 300000.00, 300000.00, 11, 33000.00, 333000.00, 'ewallet', 'paid', 333000.00, '2026-01-10 11:00:00', '2026-01-10 11:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (5, 'membership', 3, 'Basic Monthly', 1, 300000.00, 300000.00, '2026-01-10 11:00:00');
@@ -1869,8 +2017,8 @@ INSERT INTO `vouchers` (`id`, `code`, `promo_id`, `voucher_type`, `discount_valu
 (2, 'NEWMEMBER50K', NULL, 'fixed', 50000, 200000, NULL, 'all', '2026-01-01 00:00:00', '2026-12-31 23:59:59', 100, 0, 1, 1, '2026-01-01 00:00:00');
 
 -- Transaksi pembelian 10 Class Pass dengan voucher
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `discount_type`, `discount_value`, `discount_amount`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `voucher_code`, `paid_at`, `created_at`) VALUES
-(6, 'TRX-20260112-0006', 8, 3, 350000.00, 'percentage', 20, 70000.00, 280000.00, 11, 30800.00, 310800.00, 'qris', 'paid', 310800.00, 'CLASSFIT20', '2026-01-12 14:00:00', '2026-01-12 14:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `discount_type`, `discount_value`, `discount_amount`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `voucher_code`, `paid_at`, `created_at`) VALUES
+(6, 1, 'TRX-20260112-0006', 8, 3, 350000.00, 'percentage', 20, 70000.00, 280000.00, 11, 30800.00, 310800.00, 'qris', 'paid', 310800.00, 'CLASSFIT20', '2026-01-12 14:00:00', '2026-01-12 14:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `discount_type`, `discount_value`, `discount_amount`, `subtotal`, `created_at`) VALUES
 (6, 'class_pass', 3, '10 Class Pass', 1, 350000.00, 'percentage', 20, 70000.00, 280000.00, '2026-01-12 14:00:00');
@@ -1890,26 +2038,26 @@ INSERT INTO `member_class_passes` (`id`, `user_id`, `class_package_id`, `transac
 -- Class Bookings Andi (4 sudah digunakan dari class_pass_id=1)
 -- Andi punya Basic Monthly (include_classes=0), jadi harus pakai Class Pass
 -- access_type='class_pass' dengan class_pass_id=1 (10 Class Pass)
-INSERT INTO `class_bookings` (`user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
 -- Yoga sudah attend (2 kelas)
-(8, 1, '2026-01-13', 'class_pass', NULL, 1, 'attended', '2026-01-12 15:00:00', '2026-01-13 07:00:00', 'Class Pass 1/10', '2026-01-12 15:00:00'),
-(8, 2, '2026-01-20', 'class_pass', NULL, 1, 'attended', '2026-01-15 10:00:00', '2026-01-20 07:00:00', 'Class Pass 2/10', '2026-01-15 10:00:00'),
+(1, 8, 1, '2026-01-13', 'class_pass', NULL, 1, 'attended', '2026-01-12 15:00:00', '2026-01-13 07:00:00', 'Class Pass 1/10', '2026-01-12 15:00:00'),
+(1, 8, 2, '2026-01-20', 'class_pass', NULL, 1, 'attended', '2026-01-15 10:00:00', '2026-01-20 07:00:00', 'Class Pass 2/10', '2026-01-15 10:00:00'),
 -- Spinning sudah attend (2 kelas)
-(8, 3, '2026-01-14', 'class_pass', NULL, 1, 'attended', '2026-01-12 16:00:00', '2026-01-14 18:00:00', 'Class Pass 3/10', '2026-01-12 16:00:00'),
-(8, 4, '2026-01-16', 'class_pass', NULL, 1, 'attended', '2026-01-14 19:00:00', '2026-01-16 18:00:00', 'Class Pass 4/10', '2026-01-14 19:00:00'),
+(1, 8, 3, '2026-01-14', 'class_pass', NULL, 1, 'attended', '2026-01-12 16:00:00', '2026-01-14 18:00:00', 'Class Pass 3/10', '2026-01-12 16:00:00'),
+(1, 8, 4, '2026-01-16', 'class_pass', NULL, 1, 'attended', '2026-01-14 19:00:00', '2026-01-16 18:00:00', 'Class Pass 4/10', '2026-01-14 19:00:00'),
 -- Upcoming bookings (sisa 6 kelas)
-(8, 5, '2026-02-01', 'class_pass', NULL, 1, 'booked', '2026-01-26 20:00:00', NULL, 'Class Pass 5/10 - Zumba', '2026-01-26 20:00:00'),
-(8, 7, '2026-01-28', 'class_pass', NULL, 1, 'booked', '2026-01-26 21:00:00', NULL, 'Class Pass 6/10 - Pilates', '2026-01-26 21:00:00');
+(1, 8, 5, '2026-02-01', 'class_pass', NULL, 1, 'booked', '2026-01-26 20:00:00', NULL, 'Class Pass 5/10 - Zumba', '2026-01-26 20:00:00'),
+(1, 8, 7, '2026-01-28', 'class_pass', NULL, 1, 'booked', '2026-01-26 21:00:00', NULL, 'Class Pass 6/10 - Pilates', '2026-01-26 21:00:00');
 
 -- Check-in records Andi (Basic Monthly = akses gym, TAPI kelas pakai class pass)
 -- Andi tetap checkin_type='gym' karena punya Basic Monthly membership
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
-(8, 'gym', 3, NULL, '2026-01-13 06:30:00', '2026-01-13 08:30:00', 'qr_code', '2026-01-13 06:30:00'),  -- Yoga class day
-(8, 'gym', 3, NULL, '2026-01-14 17:30:00', '2026-01-14 19:30:00', 'qr_code', '2026-01-14 17:30:00'),  -- Spinning class day
-(8, 'gym', 3, NULL, '2026-01-16 17:30:00', '2026-01-16 19:30:00', 'qr_code', '2026-01-16 17:30:00'),  -- Spinning class day
-(8, 'gym', 3, NULL, '2026-01-18 18:00:00', '2026-01-18 19:30:00', 'qr_code', '2026-01-18 18:00:00'),
-(8, 'gym', 3, NULL, '2026-01-20 06:30:00', '2026-01-20 09:00:00', 'qr_code', '2026-01-20 06:30:00'),  -- Yoga class day
-(8, 'gym', 3, NULL, '2026-01-24 18:00:00', '2026-01-24 19:30:00', 'qr_code', '2026-01-24 18:00:00');
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
+(1, 8, 'gym', 3, NULL, '2026-01-13 06:30:00', '2026-01-13 08:30:00', 'qr_code', '2026-01-13 06:30:00'),  -- Yoga class day
+(1, 8, 'gym', 3, NULL, '2026-01-14 17:30:00', '2026-01-14 19:30:00', 'qr_code', '2026-01-14 17:30:00'),  -- Spinning class day
+(1, 8, 'gym', 3, NULL, '2026-01-16 17:30:00', '2026-01-16 19:30:00', 'qr_code', '2026-01-16 17:30:00'),  -- Spinning class day
+(1, 8, 'gym', 3, NULL, '2026-01-18 18:00:00', '2026-01-18 19:30:00', 'qr_code', '2026-01-18 18:00:00'),
+(1, 8, 'gym', 3, NULL, '2026-01-20 06:30:00', '2026-01-20 09:00:00', 'qr_code', '2026-01-20 06:30:00'),  -- Yoga class day
+(1, 8, 'gym', 3, NULL, '2026-01-24 18:00:00', '2026-01-24 19:30:00', 'qr_code', '2026-01-24 18:00:00');
 
 -- ============================================================================
 -- SKENARIO 4: Member Expired (Dewi Lestari)
@@ -1920,12 +2068,12 @@ INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `membership_cod
 (4, 9, 3, 'MBR-20251201-DEW001', '2025-12-01', '2025-12-31', 'expired', 0, '2025-12-01 10:00:00');
 
 -- Check-in history sebelum expired
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
-(9, 'gym', 4, NULL, '2025-12-05 18:00:00', '2025-12-05 19:30:00', 'qr_code', '2025-12-05 18:00:00'),
-(9, 'gym', 4, NULL, '2025-12-10 07:00:00', '2025-12-10 08:30:00', 'qr_code', '2025-12-10 07:00:00'),
-(9, 'gym', 4, NULL, '2025-12-15 18:00:00', '2025-12-15 19:30:00', 'qr_code', '2025-12-15 18:00:00'),
-(9, 'gym', 4, NULL, '2025-12-20 09:00:00', '2025-12-20 10:30:00', 'qr_code', '2025-12-20 09:00:00'),
-(9, 'gym', 4, NULL, '2025-12-28 17:00:00', '2025-12-28 18:30:00', 'qr_code', '2025-12-28 17:00:00');
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
+(1, 9, 'gym', 4, NULL, '2025-12-05 18:00:00', '2025-12-05 19:30:00', 'qr_code', '2025-12-05 18:00:00'),
+(1, 9, 'gym', 4, NULL, '2025-12-10 07:00:00', '2025-12-10 08:30:00', 'qr_code', '2025-12-10 07:00:00'),
+(1, 9, 'gym', 4, NULL, '2025-12-15 18:00:00', '2025-12-15 19:30:00', 'qr_code', '2025-12-15 18:00:00'),
+(1, 9, 'gym', 4, NULL, '2025-12-20 09:00:00', '2025-12-20 10:30:00', 'qr_code', '2025-12-20 09:00:00'),
+(1, 9, 'gym', 4, NULL, '2025-12-28 17:00:00', '2025-12-28 18:30:00', 'qr_code', '2025-12-28 17:00:00');
 
 -- ============================================================================
 -- SKENARIO 5: Member Frozen (Rudi Hermawan)
@@ -1936,13 +2084,13 @@ INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `membership_cod
 (5, 10, 4, 'MBR-20260101-RUD001', '2026-01-01', '2026-01-31', 'frozen', '2026-01-20 10:00:00', '2026-02-03', 'Sakit / istirahat dokter', 0, '2026-01-01 12:00:00');
 
 -- Check-in history sebelum freeze
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
-(10, 'gym', 5, NULL, '2026-01-02 06:00:00', '2026-01-02 07:30:00', 'qr_code', '2026-01-02 06:00:00'),
-(10, 'gym', 5, NULL, '2026-01-05 06:00:00', '2026-01-05 07:30:00', 'qr_code', '2026-01-05 06:00:00'),
-(10, 'gym', 5, NULL, '2026-01-08 06:00:00', '2026-01-08 07:30:00', 'qr_code', '2026-01-08 06:00:00'),
-(10, 'gym', 5, NULL, '2026-01-12 06:00:00', '2026-01-12 07:30:00', 'qr_code', '2026-01-12 06:00:00'),
-(10, 'gym', 5, NULL, '2026-01-15 06:00:00', '2026-01-15 07:30:00', 'qr_code', '2026-01-15 06:00:00'),
-(10, 'gym', 5, NULL, '2026-01-18 06:00:00', '2026-01-18 07:00:00', 'qr_code', '2026-01-18 06:00:00');  -- Last before freeze
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `created_at`) VALUES
+(1, 10, 'gym', 5, NULL, '2026-01-02 06:00:00', '2026-01-02 07:30:00', 'qr_code', '2026-01-02 06:00:00'),
+(1, 10, 'gym', 5, NULL, '2026-01-05 06:00:00', '2026-01-05 07:30:00', 'qr_code', '2026-01-05 06:00:00'),
+(1, 10, 'gym', 5, NULL, '2026-01-08 06:00:00', '2026-01-08 07:30:00', 'qr_code', '2026-01-08 06:00:00'),
+(1, 10, 'gym', 5, NULL, '2026-01-12 06:00:00', '2026-01-12 07:30:00', 'qr_code', '2026-01-12 06:00:00'),
+(1, 10, 'gym', 5, NULL, '2026-01-15 06:00:00', '2026-01-15 07:30:00', 'qr_code', '2026-01-15 06:00:00'),
+(1, 10, 'gym', 5, NULL, '2026-01-18 06:00:00', '2026-01-18 07:00:00', 'qr_code', '2026-01-18 06:00:00');  -- Last before freeze
 
 -- ============================================================================
 -- SKENARIO 6: User yang HANYA beli Class Pass (tanpa membership gym)
@@ -1955,8 +2103,8 @@ INSERT INTO `users` (`id`, `name`, `email`, `password`, `phone`, `role_id`, `is_
 (12, 'Lisa Permata', 'lisa.permata@email.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VQIy8wPQpwJrCi', '081355556666', 3, 1, 1, '2026-01-20 11:00:00');
 
 -- Transaksi beli 5 Class Pass Yoga
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `notes`, `created_at`) VALUES
-(11, 'TRX-20260120-0011', 12, 3, 200000.00, 200000.00, 11, 22000.00, 222000.00, 'qris', 'paid', 222000.00, '2026-01-20 11:00:00', 'Class Pass only - no gym membership', '2026-01-20 11:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `notes`, `created_at`) VALUES
+(11, 1, 'TRX-20260120-0011', 12, 3, 200000.00, 200000.00, 11, 22000.00, 222000.00, 'qris', 'paid', 222000.00, '2026-01-20 11:00:00', 'Class Pass only - no gym membership', '2026-01-20 11:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `metadata`, `created_at`) VALUES
 (11, 'class_pass', 2, '5 Class Pass', 1, 200000.00, 200000.00, '{"class_type": "all"}', '2026-01-20 11:00:00');
@@ -1966,40 +2114,40 @@ INSERT INTO `member_class_passes` (`id`, `user_id`, `class_package_id`, `transac
 (3, 12, 2, 11, 5, 2, '2026-01-20', '2026-02-20', 'active', '2026-01-20 11:00:00');
 
 -- Class Bookings Lisa (pakai class pass, TANPA membership)
-INSERT INTO `class_bookings` (`user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
 -- Yoga sudah attend (2 kelas terpakai)
-(12, 1, '2026-01-20', 'class_pass', NULL, 3, 'attended', '2026-01-20 11:30:00', '2026-01-20 07:00:00', 'Class Pass 1/5 - no gym access', '2026-01-20 11:30:00'),
-(12, 2, '2026-01-22', 'class_pass', NULL, 3, 'attended', '2026-01-20 12:00:00', '2026-01-22 07:00:00', 'Class Pass 2/5 - no gym access', '2026-01-20 12:00:00'),
+(1, 12, 1, '2026-01-20', 'class_pass', NULL, 3, 'attended', '2026-01-20 11:30:00', '2026-01-20 07:00:00', 'Class Pass 1/5 - no gym access', '2026-01-20 11:30:00'),
+(1, 12, 2, '2026-01-22', 'class_pass', NULL, 3, 'attended', '2026-01-20 12:00:00', '2026-01-22 07:00:00', 'Class Pass 2/5 - no gym access', '2026-01-20 12:00:00'),
 -- Upcoming
-(12, 1, '2026-01-27', 'class_pass', NULL, 3, 'booked', '2026-01-25 20:00:00', NULL, 'Class Pass 3/5 - Yoga Monday', '2026-01-25 20:00:00');
+(1, 12, 1, '2026-01-27', 'class_pass', NULL, 3, 'booked', '2026-01-25 20:00:00', NULL, 'Class Pass 3/5 - Yoga Monday', '2026-01-25 20:00:00');
 
 -- Check-in Lisa: HANYA untuk kelas (checkin_type='class_only')
 -- Lisa tidak punya membership, jadi hanya bisa akses area kelas (studio)
-INSERT INTO `member_checkins` (`user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
-(12, 'class_only', NULL, 3, '2026-01-20 06:45:00', '2026-01-20 08:15:00', 'manual', 'Class only - Yoga', '2026-01-20 06:45:00'),
-(12, 'class_only', NULL, 3, '2026-01-22 06:45:00', '2026-01-22 08:15:00', 'manual', 'Class only - Yoga', '2026-01-22 06:45:00');
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(1, 12, 'class_only', NULL, 3, '2026-01-20 06:45:00', '2026-01-20 08:15:00', 'manual', 'Class only - Yoga', '2026-01-20 06:45:00'),
+(1, 12, 'class_only', NULL, 3, '2026-01-22 06:45:00', '2026-01-22 08:15:00', 'manual', 'Class only - Yoga', '2026-01-22 06:45:00');
 
 -- Notifikasi untuk Lisa
-INSERT INTO `notifications` (`user_id`, `type`, `title`, `message`, `data`, `is_read`, `created_at`) VALUES
-(12, 'success', 'Class Pass Dibeli', '5 Class Pass berhasil dibeli. Anda bisa ikut kelas tanpa membership gym!', '{"action": "view_class_pass", "class_pass_id": 3}', 1, '2026-01-20 11:00:00'),
-(12, 'info', 'Akses Terbatas', 'Reminder: Class Pass hanya memberikan akses ke area kelas. Upgrade ke membership untuk akses gym penuh!', '{"action": "view_packages"}', 0, '2026-01-21 09:00:00');
+INSERT INTO `notifications` (`branch_id`, `user_id`, `type`, `title`, `message`, `data`, `is_read`, `created_at`) VALUES
+(1, 12, 'success', 'Class Pass Dibeli', '5 Class Pass berhasil dibeli. Anda bisa ikut kelas tanpa membership gym!', '{"action": "view_class_pass", "class_pass_id": 3}', 1, '2026-01-20 11:00:00'),
+(1, 12, 'info', 'Akses Terbatas', 'Reminder: Class Pass hanya memberikan akses ke area kelas. Upgrade ke membership untuk akses gym penuh!', '{"action": "view_packages"}', 0, '2026-01-21 09:00:00');
 
 -- ============================================================================
 -- SKENARIO 7: Walk-in Customer (tanpa membership, beli produk saja)
 -- ============================================================================
 
 -- Transaksi walk-in beli produk
-INSERT INTO `transactions` (`id`, `transaction_code`, `user_id`, `staff_id`, `customer_name`, `customer_phone`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
-(7, 'TRX-20260127-0007', NULL, 3, 'John Doe', '081299998888', 43000.00, 43000.00, 11, 4730.00, 47730.00, 'cash', 'paid', 50000.00, 2270.00, '2026-01-27 15:00:00', '2026-01-27 15:00:00');
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `customer_name`, `customer_phone`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
+(7, 1, 'TRX-20260127-0007', NULL, 3, 'John Doe', '081299998888', 43000.00, 43000.00, 11, 4730.00, 47730.00, 'cash', 'paid', 50000.00, 2270.00, '2026-01-27 15:00:00', '2026-01-27 15:00:00');
 
 INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
 (7, 'product', 3, 'Protein Shake', 1, 35000.00, 35000.00, '2026-01-27 15:00:00'),
 (7, 'product', 4, 'Mineral Water 600ml', 1, 8000.00, 8000.00, '2026-01-27 15:00:00');
 
 -- Update stock (27 Jan 2026 - setelah pembelian Siti dan Budi)
-INSERT INTO `product_stock_logs` (`product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
-(3, 'out', 1, 49, 48, 'transaction', 7, 'Penjualan walk-in', 3, '2026-01-27 15:00:00'),
-(4, 'out', 1, 99, 98, 'transaction', 7, 'Penjualan walk-in', 3, '2026-01-27 15:00:00');
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 3, 'out', 1, 49, 48, 'transaction', 7, 'Penjualan walk-in', 3, '2026-01-27 15:00:00'),
+(1, 4, 'out', 1, 99, 98, 'transaction', 7, 'Penjualan walk-in', 3, '2026-01-27 15:00:00');
 
 UPDATE `products` SET `stock` = 48 WHERE `id` = 3;
 UPDATE `products` SET `stock` = 98 WHERE `id` = 4;
@@ -2009,10 +2157,10 @@ UPDATE `products` SET `stock` = 98 WHERE `id` = 4;
 -- ============================================================================
 
 -- Stock masuk (Purchase Order)
-INSERT INTO `product_stock_logs` (`product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
-(1, 'in', 10, 20, 30, 'purchase_order', NULL, 'Restock Whey Protein dari supplier', 2, '2026-01-20 09:00:00'),
-(2, 'in', 10, 15, 25, 'purchase_order', NULL, 'Restock BCAA dari supplier', 2, '2026-01-20 09:00:00'),
-(3, 'in', 50, 48, 98, 'purchase_order', NULL, 'Restock Protein Shake', 2, '2026-01-25 10:00:00');
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 1, 'in', 10, 20, 30, 'purchase_order', NULL, 'Restock Whey Protein dari supplier', 2, '2026-01-20 09:00:00'),
+(1, 2, 'in', 10, 15, 25, 'purchase_order', NULL, 'Restock BCAA dari supplier', 2, '2026-01-20 09:00:00'),
+(1, 3, 'in', 50, 48, 98, 'purchase_order', NULL, 'Restock Protein Shake', 2, '2026-01-25 10:00:00');
 
 UPDATE `products` SET `stock` = 30 WHERE `id` = 1;
 UPDATE `products` SET `stock` = 25 WHERE `id` = 2;
@@ -2020,8 +2168,8 @@ UPDATE `products` SET `stock` = 98 WHERE `id` = 3;
 
 -- Stock adjustment (expired/rusak) - 26 Jan 2026
 -- Stock sebelumnya: 40 (awal) - 1 (Siti) - 1 (Budi) = 38
-INSERT INTO `product_stock_logs` (`product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
-(5, 'adjustment', -2, 38, 36, 'adjustment', NULL, 'Energy bar expired', 2, '2026-01-26 16:00:00');
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 5, 'adjustment', -2, 38, 36, 'adjustment', NULL, 'Energy bar expired', 2, '2026-01-26 16:00:00');
 
 UPDATE `products` SET `stock` = 36 WHERE `id` = 5;
 
@@ -2029,64 +2177,207 @@ UPDATE `products` SET `stock` = 36 WHERE `id` = 5;
 -- NOTIFICATIONS
 -- ============================================================================
 
-INSERT INTO `notifications` (`user_id`, `type`, `title`, `message`, `data`, `is_read`, `created_at`) VALUES
+INSERT INTO `notifications` (`branch_id`, `user_id`, `type`, `title`, `message`, `data`, `is_read`, `created_at`) VALUES
 -- Notifikasi untuk Budi
-(6, 'success', 'Selamat Bergabung!', 'Membership Premium Monthly Anda sudah aktif. Nikmati akses ke gym, pool, dan sauna!', '{"action": "view_membership", "membership_id": 1}', 1, '2026-01-15 10:30:00'),
-(6, 'reminder', 'Jangan Lupa Workout!', 'Sudah 2 hari Anda tidak ke gym. Yuk jaga konsistensi!', '{"action": "checkin"}', 0, '2026-01-23 09:00:00'),
+(1, 6, 'success', 'Selamat Bergabung!', 'Membership Premium Monthly Anda sudah aktif. Nikmati akses ke gym, pool, dan sauna!', '{"action": "view_membership", "membership_id": 1}', 1, '2026-01-15 10:30:00'),
+(1, 6, 'reminder', 'Jangan Lupa Workout!', 'Sudah 2 hari Anda tidak ke gym. Yuk jaga konsistensi!', '{"action": "checkin"}', 0, '2026-01-23 09:00:00'),
 
 -- Notifikasi untuk Siti
-(7, 'success', 'Selamat Datang!', 'Terima kasih sudah mencoba Daily Pass! Semoga pengalaman pertama Anda menyenangkan.', '{"action": "view_membership", "membership_id": 6}', 1, '2025-12-25 09:00:00'),
-(7, 'promo', 'Promo Khusus Untuk Anda', 'Upgrade ke VIP Membership dan dapatkan akses premium! Hubungi staff kami.', '{"action": "view_packages"}', 1, '2025-12-26 10:00:00'),
-(7, 'success', 'VIP Membership Aktif', 'Selamat! Anda sekarang member VIP. Nikmati semua fasilitas premium!', '{"action": "view_membership", "membership_id": 2}', 1, '2026-01-01 14:00:00'),
-(7, 'success', 'PT Package Dibeli', 'Paket PT 10 Sessions dengan Coach Eko sudah aktif. Jadwalkan sesi pertama Anda!', '{"action": "view_pt_session", "pt_session_id": 1}', 1, '2026-01-02 15:00:00'),
-(7, 'reminder', 'Kelas Yoga Besok', 'Reminder: Anda terdaftar di kelas Yoga besok jam 07:00. Selamat berlatih!', '{"action": "view_class_booking", "class_date": "2026-01-06"}', 1, '2026-01-05 18:00:00'),
-(7, 'success', 'Single Class Dibeli', 'Pembelian Single Class Zumba untuk teman berhasil! Ajak teman Anda ke kelas.', '{"action": "view_class_booking", "class_date": "2026-01-25"}', 1, '2026-01-18 10:00:00'),
-(7, 'reminder', 'Kelas Zumba Besok', 'Reminder: Kelas Zumba besok jam 09:00. Jangan lupa ajak teman Diana!', '{"action": "view_class_booking", "class_date": "2026-01-25"}', 1, '2026-01-24 18:00:00'),
-(7, 'info', 'PT Session Reminder', 'Jangan lupa! Besok Anda ada PT session jam 10:00 dengan Coach Eko', '{"action": "view_pt_booking", "booking_id": 4}', 0, '2026-01-25 18:00:00'),
-(7, 'reminder', 'Kelas Pilates', 'Reminder: Anda terdaftar di kelas Pilates tanggal 28 Jan jam 09:00', '{"action": "view_class_booking", "class_date": "2026-01-28"}', 0, '2026-01-27 18:00:00'),
-(7, 'billing', 'Tagihan Akan Datang', 'Subscription VIP Monthly Anda akan ditagihkan pada 1 Februari 2026', '{"action": "view_subscription", "subscription_id": 1}', 0, '2026-01-25 10:00:00'),
+(1, 7, 'success', 'Selamat Datang!', 'Terima kasih sudah mencoba Daily Pass! Semoga pengalaman pertama Anda menyenangkan.', '{"action": "view_membership", "membership_id": 6}', 1, '2025-12-25 09:00:00'),
+(1, 7, 'promo', 'Promo Khusus Untuk Anda', 'Upgrade ke VIP Membership dan dapatkan akses premium! Hubungi staff kami.', '{"action": "view_packages"}', 1, '2025-12-26 10:00:00'),
+(1, 7, 'success', 'VIP Membership Aktif', 'Selamat! Anda sekarang member VIP. Nikmati semua fasilitas premium!', '{"action": "view_membership", "membership_id": 2}', 1, '2026-01-01 14:00:00'),
+(1, 7, 'success', 'PT Package Dibeli', 'Paket PT 10 Sessions dengan Coach Eko sudah aktif. Jadwalkan sesi pertama Anda!', '{"action": "view_pt_session", "pt_session_id": 1}', 1, '2026-01-02 15:00:00'),
+(1, 7, 'reminder', 'Kelas Yoga Besok', 'Reminder: Anda terdaftar di kelas Yoga besok jam 07:00. Selamat berlatih!', '{"action": "view_class_booking", "class_date": "2026-01-06"}', 1, '2026-01-05 18:00:00'),
+(1, 7, 'success', 'Single Class Dibeli', 'Pembelian Single Class Zumba untuk teman berhasil! Ajak teman Anda ke kelas.', '{"action": "view_class_booking", "class_date": "2026-01-25"}', 1, '2026-01-18 10:00:00'),
+(1, 7, 'reminder', 'Kelas Zumba Besok', 'Reminder: Kelas Zumba besok jam 09:00. Jangan lupa ajak teman Diana!', '{"action": "view_class_booking", "class_date": "2026-01-25"}', 1, '2026-01-24 18:00:00'),
+(1, 7, 'info', 'PT Session Reminder', 'Jangan lupa! Besok Anda ada PT session jam 10:00 dengan Coach Eko', '{"action": "view_pt_booking", "booking_id": 4}', 0, '2026-01-25 18:00:00'),
+(1, 7, 'reminder', 'Kelas Pilates', 'Reminder: Anda terdaftar di kelas Pilates tanggal 28 Jan jam 09:00', '{"action": "view_class_booking", "class_date": "2026-01-28"}', 0, '2026-01-27 18:00:00'),
+(1, 7, 'billing', 'Tagihan Akan Datang', 'Subscription VIP Monthly Anda akan ditagihkan pada 1 Februari 2026', '{"action": "view_subscription", "subscription_id": 1}', 0, '2026-01-25 10:00:00'),
 
 -- Notifikasi untuk Andi
-(8, 'success', 'Class Pass Dibeli', 'Paket 10 Class Pass berhasil dibeli. Selamat berlatih!', '{"action": "view_class_pass", "class_pass_id": 1}', 1, '2026-01-12 14:00:00'),
-(8, 'reminder', 'Kelas Besok', 'Reminder: Anda terdaftar di kelas Pilates besok jam 09:00', '{"action": "view_class_booking", "schedule_id": 7}', 0, '2026-01-27 18:00:00'),
+(1, 8, 'success', 'Class Pass Dibeli', 'Paket 10 Class Pass berhasil dibeli. Selamat berlatih!', '{"action": "view_class_pass", "class_pass_id": 1}', 1, '2026-01-12 14:00:00'),
+(1, 8, 'reminder', 'Kelas Besok', 'Reminder: Anda terdaftar di kelas Pilates besok jam 09:00', '{"action": "view_class_booking", "schedule_id": 7}', 0, '2026-01-27 18:00:00'),
 
 -- Notifikasi untuk Dewi (expired member)
-(9, 'warning', 'Membership Expired', 'Membership Anda sudah expired pada 31 Desember 2025. Perpanjang sekarang!', '{"action": "renew_membership", "package_id": 3}', 0, '2026-01-01 00:00:00'),
-(9, 'promo', 'Promo Khusus Untuk Anda', 'Perpanjang membership sekarang dan dapatkan diskon 10%! Gunakan kode: COMEBACK10', '{"action": "view_promo", "voucher_code": "COMEBACK10"}', 0, '2026-01-15 10:00:00'),
+(1, 9, 'warning', 'Membership Expired', 'Membership Anda sudah expired pada 31 Desember 2025. Perpanjang sekarang!', '{"action": "renew_membership", "package_id": 3}', 0, '2026-01-01 00:00:00'),
+(1, 9, 'promo', 'Promo Khusus Untuk Anda', 'Perpanjang membership sekarang dan dapatkan diskon 10%! Gunakan kode: COMEBACK10', '{"action": "view_promo", "voucher_code": "COMEBACK10"}', 0, '2026-01-15 10:00:00'),
 
 -- Notifikasi untuk Rudi (frozen member)
-(10, 'info', 'Membership Dibekukan', 'Membership Anda dibekukan hingga 3 Februari 2026. Semoga lekas sembuh!', '{"action": "view_membership", "membership_id": 5}', 1, '2026-01-20 10:00:00'),
-(10, 'reminder', 'Membership Akan Aktif Kembali', 'Membership Anda akan aktif kembali pada 4 Februari 2026. Siap workout lagi?', '{"action": "view_membership", "membership_id": 5}', 0, '2026-01-31 09:00:00');
+(1, 10, 'info', 'Membership Dibekukan', 'Membership Anda dibekukan hingga 3 Februari 2026. Semoga lekas sembuh!', '{"action": "view_membership", "membership_id": 5}', 1, '2026-01-20 10:00:00'),
+(1, 10, 'reminder', 'Membership Akan Aktif Kembali', 'Membership Anda akan aktif kembali pada 4 Februari 2026. Siap workout lagi?', '{"action": "view_membership", "membership_id": 5}', 0, '2026-01-31 09:00:00');
 
 -- ============================================================================
 -- AUDIT LOGS
 -- ============================================================================
 
-INSERT INTO `audit_logs` (`table_name`, `record_id`, `action`, `user_id`, `old_data`, `new_data`, `ip_address`, `created_at`) VALUES
+INSERT INTO `audit_logs` (`branch_id`, `table_name`, `record_id`, `action`, `user_id`, `old_data`, `new_data`, `ip_address`, `created_at`) VALUES
 -- User creation
-('users', 6, 'create', 2, NULL, '{"name": "Budi Santoso", "email": "budi.santoso@email.com", "role_id": 3}', '192.168.1.100', '2026-01-15 10:00:00'),
-('users', 7, 'create', 2, NULL, '{"name": "Siti Rahayu", "email": "siti.rahayu@email.com", "role_id": 3}', '192.168.1.100', '2026-01-01 13:30:00'),
-('users', 8, 'create', 2, NULL, '{"name": "Andi Wijaya", "email": "andi.wijaya@email.com", "role_id": 3}', '192.168.1.100', '2026-01-10 10:30:00'),
+(1, 'users', 6, 'create', 2, NULL, '{"name": "Budi Santoso", "email": "budi.santoso@email.com", "role_id": 3}', '192.168.1.100', '2026-01-15 10:00:00'),
+(1, 'users', 7, 'create', 2, NULL, '{"name": "Siti Rahayu", "email": "siti.rahayu@email.com", "role_id": 3}', '192.168.1.100', '2026-01-01 13:30:00'),
+(1, 'users', 8, 'create', 2, NULL, '{"name": "Andi Wijaya", "email": "andi.wijaya@email.com", "role_id": 3}', '192.168.1.100', '2026-01-10 10:30:00'),
 
 -- Membership freeze
-('member_memberships', 5, 'update', 2, '{"status": "active"}', '{"status": "frozen", "freeze_reason": "Sakit / istirahat dokter"}', '192.168.1.100', '2026-01-20 10:00:00'),
+(1, 'member_memberships', 5, 'update', 2, '{"status": "active"}', '{"status": "frozen", "freeze_reason": "Sakit / istirahat dokter"}', '192.168.1.100', '2026-01-20 10:00:00'),
 
 -- PT Session completion
-('pt_bookings', 1, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-05 11:00:00"}', '192.168.1.101', '2026-01-05 11:00:00'),
-('pt_bookings', 2, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-12 11:00:00"}', '192.168.1.101', '2026-01-12 11:00:00'),
-('pt_bookings', 3, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-19 11:00:00"}', '192.168.1.101', '2026-01-19 11:00:00'),
+(1, 'pt_bookings', 1, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-05 11:00:00"}', '192.168.1.101', '2026-01-05 11:00:00'),
+(1, 'pt_bookings', 2, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-12 11:00:00"}', '192.168.1.101', '2026-01-12 11:00:00'),
+(1, 'pt_bookings', 3, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-19 11:00:00"}', '192.168.1.101', '2026-01-19 11:00:00'),
 
 -- Stock adjustments
-('products', 5, 'update', 2, '{"stock": 38}', '{"stock": 36, "reason": "Energy bar expired"}', '192.168.1.100', '2026-01-26 16:00:00'),
+(1, 'products', 5, 'update', 2, '{"stock": 38}', '{"stock": 36, "reason": "Energy bar expired"}', '192.168.1.100', '2026-01-26 16:00:00'),
 
 -- Siti Rahayu journey: Daily Pass -> VIP Member
-('member_memberships', 6, 'create', 3, NULL, '{"user_id": 7, "package_id": 1, "status": "active", "type": "Daily Pass trial"}', '192.168.1.102', '2025-12-25 09:00:00'),
-('member_memberships', 2, 'create', 2, NULL, '{"user_id": 7, "package_id": 5, "status": "active", "type": "VIP Monthly"}', '192.168.1.100', '2026-01-01 14:00:00'),
+(1, 'member_memberships', 6, 'create', 3, NULL, '{"user_id": 7, "package_id": 1, "status": "active", "type": "Daily Pass trial"}', '192.168.1.102', '2025-12-25 09:00:00'),
+(1, 'member_memberships', 2, 'create', 2, NULL, '{"user_id": 7, "package_id": 5, "status": "active", "type": "VIP Monthly"}', '192.168.1.100', '2026-01-01 14:00:00'),
 
 -- Transactions
-('transactions', 8, 'create', 3, NULL, '{"user_id": 7, "type": "Daily Pass", "total": 55500}', '192.168.1.102', '2025-12-25 09:00:00'),
-('transactions', 9, 'create', 3, NULL, '{"user_id": 7, "type": "product_sale", "items": ["Mineral Water", "Energy Bar"], "total": 36630}', '192.168.1.102', '2026-01-05 11:15:00'),
-('transactions', 10, 'create', 3, NULL, '{"user_id": 7, "type": "class_pass", "items": ["Single Class Zumba"], "total": 55500, "note": "untuk teman non-member"}', '192.168.1.102', '2026-01-18 10:00:00');
+(1, 'transactions', 8, 'create', 3, NULL, '{"user_id": 7, "type": "Daily Pass", "total": 55500}', '192.168.1.102', '2025-12-25 09:00:00'),
+(1, 'transactions', 9, 'create', 3, NULL, '{"user_id": 7, "type": "product_sale", "items": ["Mineral Water", "Energy Bar"], "total": 36630}', '192.168.1.102', '2026-01-05 11:15:00'),
+(1, 'transactions', 10, 'create', 3, NULL, '{"user_id": 7, "type": "class_pass", "items": ["Single Class Zumba"], "total": 55500, "note": "untuk teman non-member"}', '192.168.1.102', '2026-01-18 10:00:00');
+
+-- ----------------------------
+-- Trainer Branch Assignments
+-- ----------------------------
+INSERT INTO `trainer_branches` (`trainer_id`, `branch_id`, `is_primary`) VALUES
+(1, 1, 1),  -- Coach Eko -> Jakarta (primary)
+(1, 2, 0),  -- Coach Eko -> Tangerang
+(2, 1, 1),  -- Coach Maya -> Jakarta (primary)
+(2, 3, 0);  -- Coach Maya -> Bandung
+
+-- ----------------------------
+-- Branch Product Stock (stock per cabang)
+-- ----------------------------
+INSERT INTO `branch_product_stock` (`branch_id`, `product_id`, `stock`, `min_stock`) VALUES
+-- Jakarta (cabang utama, stock terbanyak)
+(1, 1, 15, 5), (1, 2, 12, 5), (1, 3, 50, 10), (1, 4, 50, 10),
+(1, 5, 20, 5), (1, 6, 15, 3), (1, 7, 12, 3), (1, 8, 999, 0), (1, 9, 999, 0),
+-- Tangerang
+(2, 1, 8, 3), (2, 2, 8, 3), (2, 3, 25, 5), (2, 4, 25, 5),
+(2, 5, 10, 3), (2, 6, 8, 2), (2, 7, 8, 2), (2, 8, 999, 0), (2, 9, 999, 0),
+-- Bandung
+(3, 1, 7, 3), (3, 2, 5, 3), (3, 3, 23, 5), (3, 4, 23, 5),
+(3, 5, 6, 3), (3, 6, 7, 2), (3, 7, 5, 2), (3, 8, 999, 0), (3, 9, 999, 0);
+
+-- ----------------------------
+-- Class Schedules - Cabang Tangerang & Bandung
+-- ----------------------------
+INSERT INTO `class_schedules` (`branch_id`, `class_type_id`, `trainer_id`, `day_of_week`, `start_time`, `end_time`, `capacity`, `room`) VALUES
+-- Tangerang (Coach Eko)
+(2, 1, 1, 2, '08:00:00', '09:00:00', 15, 'Studio A'),  -- Yoga Tuesday @TNG
+(2, 2, 1, 4, '17:00:00', '17:45:00', 12, 'Spinning Room'),  -- Spinning Thursday @TNG
+-- Bandung (Coach Maya)
+(3, 1, 2, 3, '07:00:00', '08:00:00', 18, 'Studio A'),  -- Yoga Wednesday @BDG
+(3, 4, 2, 5, '09:00:00', '10:00:00', 12, 'Studio A');  -- Pilates Friday @BDG
+
+-- ----------------------------
+-- MULTI-BRANCH SAMPLE DATA
+-- Case: PT sessions & class bookings across different branches
+-- Membership berlaku di SEMUA cabang, trainer bisa pindah-pindah
+-- ----------------------------
+
+-- ============================
+-- 1) Siti (user 7, VIP) - PT di Tangerang dengan Coach Eko
+-- Coach Eko assigned di Jakarta (primary) & Tangerang
+-- Siti sudah punya member_pt_sessions id=1, 10 sesi, 3 used (all di Jakarta)
+-- Sekarang Siti juga latihan PT di cabang Tangerang
+-- ============================
+
+-- PT Bookings Siti di Tangerang (branch_id=2, trainer=1=Coach Eko)
+-- Session 6 & 7 di Tangerang (karena Siti sedang di Tangerang)
+INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `completed_at`, `completed_by`, `created_at`) VALUES
+(2, 1, 7, 1, '2026-02-07', '09:00:00', '10:00:00', 'completed', 'Session 6: Strength training @Tangerang', '2026-02-07 10:00:00', 5, '2026-02-03 14:00:00'),
+(2, 1, 7, 1, '2026-02-14', '09:00:00', '10:00:00', 'booked', 'Session 7: HIIT cardio @Tangerang', NULL, NULL, '2026-02-10 09:00:00');
+
+-- Update Siti's PT sessions: 4 used now (3 JKT + 1 TNG completed)
+-- remaining_sessions is auto-calculated (generated column: total - used)
+UPDATE `member_pt_sessions` SET used_sessions = 4 WHERE id = 1;
+
+-- Checkin Siti di Tangerang (membership berlaku di semua cabang)
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(2, 7, 'gym', 2, NULL, '2026-02-07 08:30:00', '2026-02-07 10:30:00', 'qr_code', 'PT session + gym @Tangerang', '2026-02-07 08:30:00'),
+(2, 7, 'gym', 2, NULL, '2026-02-08 08:00:00', '2026-02-08 09:30:00', 'qr_code', 'Morning gym @Tangerang', '2026-02-08 08:00:00');
+
+-- ============================
+-- 2) Siti (user 7, VIP) - Ikut kelas di cabang Bandung
+-- Coach Maya mengajar Yoga Wednesday & Pilates Friday di Bandung
+-- Siti punya VIP membership = include classes (unlimited)
+-- schedule_id 13 = Yoga Wednesday @BDG, schedule_id 14 = Pilates Friday @BDG
+-- ============================
+
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+-- Siti ikut Yoga di Bandung (Coach Maya)
+(3, 7, 13, '2026-02-05', 'membership', 2, NULL, 'attended', '2026-02-03 20:00:00', '2026-02-05 07:00:00', 'VIP Member - Yoga @Bandung', '2026-02-03 20:00:00'),
+-- Siti ikut Pilates di Bandung (Coach Maya)
+(3, 7, 14, '2026-02-07', 'membership', 2, NULL, 'attended', '2026-02-05 10:00:00', '2026-02-07 09:00:00', 'VIP Member - Pilates @Bandung', '2026-02-05 10:00:00'),
+-- Siti book lagi Yoga di Bandung minggu depan
+(3, 7, 13, '2026-02-12', 'membership', 2, NULL, 'booked', '2026-02-09 21:00:00', NULL, 'VIP Member - Yoga @Bandung, next week', '2026-02-09 21:00:00');
+
+-- Checkin Siti di Bandung (untuk kelas)
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(3, 7, 'gym', 2, NULL, '2026-02-05 06:45:00', '2026-02-05 08:15:00', 'qr_code', 'Yoga class @Bandung', '2026-02-05 06:45:00'),
+(3, 7, 'gym', 2, NULL, '2026-02-07 08:30:00', '2026-02-07 10:30:00', 'qr_code', 'Pilates class @Bandung', '2026-02-07 08:30:00');
+
+-- ============================
+-- 3) Budi (user 6, Premium) - Ikut kelas di Bandung
+-- Premium membership include classes
+-- schedule_id 13 = Yoga Wednesday @BDG (Coach Maya)
+-- ============================
+
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+-- Budi ikut Yoga di Bandung
+(3, 6, 13, '2026-02-05', 'membership', 1, NULL, 'attended', '2026-02-02 19:00:00', '2026-02-05 07:00:00', 'Premium Member - Yoga @Bandung, bareng Siti', '2026-02-02 19:00:00'),
+-- Budi book Pilates di Bandung
+(3, 6, 14, '2026-02-14', 'membership', 1, NULL, 'booked', '2026-02-10 20:00:00', NULL, 'Premium Member - Pilates @Bandung', '2026-02-10 20:00:00');
+
+-- Checkin Budi di Bandung
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(3, 6, 'gym', 1, NULL, '2026-02-05 06:30:00', '2026-02-05 08:30:00', 'qr_code', 'Yoga @Bandung - trip bareng Siti', '2026-02-05 06:30:00');
+
+-- ============================
+-- 4) Andi (user 8, Basic + Class Pass) - Ikut kelas di Tangerang
+-- Basic membership (gym only), kelas pakai class_pass_id=1 (10 classes, 4 used)
+-- schedule_id 11 = Yoga Tuesday @TNG (Coach Eko)
+-- schedule_id 12 = Spinning Thursday @TNG (Coach Eko)
+-- ============================
+
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+-- Andi ikut Yoga di Tangerang (pakai class pass, setelah 4 kelas di JKT)
+(2, 8, 11, '2026-02-04', 'class_pass', NULL, 1, 'attended', '2026-02-02 20:00:00', '2026-02-04 08:00:00', 'Class Pass - Yoga @Tangerang (Coach Eko)', '2026-02-02 20:00:00'),
+-- Andi ikut Spinning di Tangerang (pakai class pass)
+(2, 8, 12, '2026-02-06', 'class_pass', NULL, 1, 'attended', '2026-02-04 19:00:00', '2026-02-06 17:00:00', 'Class Pass - Spinning @Tangerang (Coach Eko)', '2026-02-04 19:00:00'),
+-- Andi book Yoga lagi di Tangerang
+(2, 8, 11, '2026-02-11', 'class_pass', NULL, 1, 'booked', '2026-02-09 10:00:00', NULL, 'Class Pass - Yoga @Tangerang next week', '2026-02-09 10:00:00');
+
+-- Update Andi's class pass: 6 used now (4 JKT + 2 TNG attended)
+-- remaining_classes is auto-calculated (generated column: total - used)
+UPDATE `member_class_passes` SET used_classes = 6 WHERE id = 1;
+
+-- Checkin Andi di Tangerang (gym + kelas)
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(2, 8, 'gym', 3, NULL, '2026-02-04 07:30:00', '2026-02-04 09:30:00', 'qr_code', 'Yoga class + gym @Tangerang', '2026-02-04 07:30:00'),
+(2, 8, 'gym', 3, NULL, '2026-02-06 16:30:00', '2026-02-06 18:30:00', 'qr_code', 'Spinning class + gym @Tangerang', '2026-02-06 16:30:00');
+
+-- ============================
+-- 5) Lisa (user 12, Class Pass Only) - Ikut kelas di Bandung
+-- Lisa punya class_pass_id=3 (5 classes, 2 used di JKT)
+-- schedule_id 14 = Pilates Friday @BDG (Coach Maya)
+-- ============================
+
+INSERT INTO `class_bookings` (`branch_id`, `user_id`, `schedule_id`, `class_date`, `access_type`, `membership_id`, `class_pass_id`, `status`, `booked_at`, `attended_at`, `notes`, `created_at`) VALUES
+-- Lisa ikut Pilates di Bandung
+(3, 12, 14, '2026-02-07', 'class_pass', NULL, 3, 'attended', '2026-02-05 11:00:00', '2026-02-07 09:00:00', 'Class Pass 3/5 - Pilates @Bandung', '2026-02-05 11:00:00'),
+-- Lisa book Yoga di Bandung
+(3, 12, 13, '2026-02-12', 'class_pass', NULL, 3, 'booked', '2026-02-09 20:00:00', NULL, 'Class Pass 4/5 - Yoga @Bandung', '2026-02-09 20:00:00');
+
+-- Update Lisa's class pass: 3 used now (2 JKT + 1 BDG attended)
+-- remaining_classes is auto-calculated (generated column: total - used)
+UPDATE `member_class_passes` SET used_classes = 3 WHERE id = 3;
+
+-- Checkin Lisa di Bandung (class only - no membership)
+INSERT INTO `member_checkins` (`branch_id`, `user_id`, `checkin_type`, `membership_id`, `class_pass_id`, `checkin_time`, `checkout_time`, `checkin_method`, `notes`, `created_at`) VALUES
+(3, 12, 'class_only', NULL, 3, '2026-02-07 08:45:00', '2026-02-07 10:15:00', 'manual', 'Class only - Pilates @Bandung', '2026-02-07 08:45:00');
+
 
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -2095,58 +2386,63 @@ SET FOREIGN_KEY_CHECKS = 1;
                             TABLE SUMMARY
 ================================================================================
 
-TOTAL: 28 TABLES
+TOTAL: 31 TABLES (+ 3 junction/stock tables = 34 CREATE TABLEs)
 
-AUTH & USERS (6 tables):
-  1. roles                 - Daftar role/jabatan
-  2. permissions           - Daftar hak akses
-  3. role_permissions      - Pivot role-permission (many-to-many)
-  4. users                 - Data semua pengguna
-  5. otp_verifications     - Kode OTP untuk verifikasi
-  6. audit_logs            - Log perubahan data untuk audit
+BRANCHES (1 table):
+  1. branches              - Daftar cabang/lokasi gym
+
+AUTH & USERS (5 tables + 1 log):
+  2. roles                 - Daftar role/jabatan
+  3. permissions           - Daftar hak akses
+  4. role_permissions      - Pivot role-permission (many-to-many)
+  5. users                 - Data semua pengguna
+  6. otp_verifications     - Kode OTP untuk verifikasi
+  7. audit_logs            - Log perubahan data untuk audit
 
 MEMBERSHIP (2 tables):
-  7. membership_packages   - Paket membership yang dijual
-  8. member_memberships    - Membership aktif member
+  8. membership_packages   - Paket membership yang dijual
+  9. member_memberships    - Membership aktif member
 
 CHECK-IN (1 table):
-  9. member_checkins       - Record check-in/checkout
+  10. member_checkins      - Record check-in/checkout
 
-TRAINERS & PT (4 tables):
-  10. trainers             - Data trainer
-  11. pt_packages          - Paket Personal Training
-  12. member_pt_sessions   - PT session yang dimiliki member
-  13. pt_bookings          - Booking jadwal PT
+TRAINERS & PT (5 tables):
+  11. trainers             - Data trainer
+  12. trainer_branches     - Assignment trainer ke cabang
+  13. pt_packages          - Paket Personal Training
+  14. member_pt_sessions   - PT session yang dimiliki member
+  15. pt_bookings          - Booking jadwal PT
 
 CLASSES (5 tables):
-  14. class_types          - Jenis-jenis kelas
-  15. class_schedules      - Jadwal kelas
-  16. class_bookings       - Booking kelas member
-  17. class_packages       - Paket kelas untuk dijual
-  18. member_class_passes  - Class pass yang dimiliki member
+  16. class_types          - Jenis-jenis kelas
+  17. class_schedules      - Jadwal kelas
+  18. class_bookings       - Booking kelas member
+  19. class_packages       - Paket kelas untuk dijual
+  20. member_class_passes  - Class pass yang dimiliki member
 
-PRODUCTS (3 tables):
-  19. product_categories   - Kategori produk
-  20. products             - Data produk POS
-  21. product_stock_logs   - Log perubahan stock
+PRODUCTS (4 tables):
+  21. product_categories   - Kategori produk
+  22. products             - Data produk POS
+  23. product_stock_logs   - Log perubahan stock
+  24. branch_product_stock - Stock produk per cabang
 
 TRANSACTIONS (2 tables):
-  22. transactions         - Header transaksi
-  23. transaction_items    - Detail item transaksi
+  25. transactions         - Header transaksi
+  26. transaction_items    - Detail item transaksi
 
 SUBSCRIPTIONS (3 tables):
-  24. payment_methods      - Metode pembayaran tersimpan
-  25. subscriptions        - Data recurring subscription
-  26. subscription_invoices - Invoice dari subscription
+  27. payment_methods      - Metode pembayaran tersimpan
+  28. subscriptions        - Data recurring subscription
+  29. subscription_invoices - Invoice dari subscription
 
 PROMOS (3 tables):
-  27. promos               - Promo otomatis
-  28. vouchers             - Voucher code
-  29. voucher_usages       - Log penggunaan voucher
+  30. promos               - Promo otomatis
+  31. vouchers             - Voucher code
+  32. voucher_usages       - Log penggunaan voucher
 
 SETTINGS & NOTIFICATIONS (2 tables):
-  30. settings             - Konfigurasi sistem
-  31. notifications        - Notifikasi user
+  33. settings             - Konfigurasi sistem
+  34. notifications        - Notifikasi user
 
 ================================================================================
 */

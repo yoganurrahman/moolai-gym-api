@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class ClassTypeUpdate(BaseModel):
 
 
 class ClassScheduleCreate(BaseModel):
+    branch_id: int
     class_type_id: int
     trainer_id: Optional[int] = None
     name: Optional[str] = None
@@ -49,6 +50,7 @@ class ClassScheduleCreate(BaseModel):
 
 
 class ClassScheduleUpdate(BaseModel):
+    branch_id: Optional[int] = None
     class_type_id: Optional[int] = None
     trainer_id: Optional[int] = None
     name: Optional[str] = None
@@ -321,6 +323,7 @@ def get_all_schedules(
     trainer_id: Optional[int] = Query(None),
     day_of_week: Optional[int] = Query(None, ge=0, le=6),
     is_active: Optional[bool] = Query(None),
+    branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
     """Get all class schedules"""
@@ -333,6 +336,9 @@ def get_all_schedules(
         where_clauses = []
         params = []
 
+        if branch_id:
+            where_clauses.append("cs.branch_id = %s")
+            params.append(branch_id)
         if class_type_id:
             where_clauses.append("cs.class_type_id = %s")
             params.append(class_type_id)
@@ -352,11 +358,13 @@ def get_all_schedules(
             f"""
             SELECT cs.*,
                    ct.name as class_name, ct.color,
-                   u.name as trainer_name
+                   u.name as trainer_name,
+                   b.name as branch_name
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
             LEFT JOIN trainers t ON cs.trainer_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
+            LEFT JOIN branches b ON cs.branch_id = b.id
             {where_sql}
             ORDER BY cs.day_of_week ASC, cs.start_time ASC
             """,
@@ -418,10 +426,11 @@ def create_schedule(
         cursor.execute(
             """
             INSERT INTO class_schedules
-            (class_type_id, trainer_id, name, day_of_week, start_time, end_time, capacity, room, is_active, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (branch_id, class_type_id, trainer_id, name, day_of_week, start_time, end_time, capacity, room, is_active, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                request.branch_id,
                 request.class_type_id,
                 request.trainer_id,
                 request.name,
@@ -479,6 +488,9 @@ def update_schedule(
         update_fields = []
         params = []
 
+        if request.branch_id is not None:
+            update_fields.append("branch_id = %s")
+            params.append(request.branch_id)
         if request.class_type_id is not None:
             update_fields.append("class_type_id = %s")
             params.append(request.class_type_id)
@@ -591,6 +603,7 @@ def get_all_bookings(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
+    branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
     """Get all class bookings"""
@@ -603,6 +616,9 @@ def get_all_bookings(
         where_clauses = []
         params = []
 
+        if branch_id:
+            where_clauses.append("cb.branch_id = %s")
+            params.append(branch_id)
         if schedule_id:
             where_clauses.append("cb.schedule_id = %s")
             params.append(schedule_id)
@@ -640,11 +656,13 @@ def get_all_bookings(
             f"""
             SELECT cb.*, cs.start_time, cs.end_time, cs.room,
                    ct.name as class_name, ct.color,
-                   u.name as member_name, u.email as member_email, u.phone as member_phone
+                   u.name as member_name, u.email as member_email, u.phone as member_phone,
+                   b.name as branch_name
             FROM class_bookings cb
             JOIN class_schedules cs ON cb.schedule_id = cs.id
             JOIN class_types ct ON cs.class_type_id = ct.id
             JOIN users u ON cb.user_id = u.id
+            LEFT JOIN branches b ON cb.branch_id = b.id
             {where_sql}
             ORDER BY cb.class_date DESC, cs.start_time ASC
             LIMIT %s OFFSET %s
@@ -682,7 +700,10 @@ def get_all_bookings(
 
 
 @router.get("/bookings/today")
-def get_today_class_schedule(auth: dict = Depends(verify_bearer_token)):
+def get_today_class_schedule(
+    branch_id: Optional[int] = Depends(get_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
     """Get today's class schedule with bookings"""
     check_permission(auth, "class.view")
 
@@ -693,11 +714,18 @@ def get_today_class_schedule(auth: dict = Depends(verify_bearer_token)):
         today = date.today()
         day_of_week_sunday = (today.weekday() + 1) % 7
 
+        branch_filter = ""
+        params = [today, today, day_of_week_sunday]
+        if branch_id:
+            branch_filter = " AND cs.branch_id = %s"
+            params.append(branch_id)
+
         cursor.execute(
-            """
+            f"""
             SELECT cs.*,
                    ct.name as class_name, ct.color,
                    u.name as trainer_name,
+                   b.name as branch_name,
                    (SELECT COUNT(*) FROM class_bookings cb
                     WHERE cb.schedule_id = cs.id AND cb.class_date = %s AND cb.status IN ('booked', 'attended')) as booked_count,
                    (SELECT COUNT(*) FROM class_bookings cb
@@ -706,10 +734,11 @@ def get_today_class_schedule(auth: dict = Depends(verify_bearer_token)):
             JOIN class_types ct ON cs.class_type_id = ct.id
             LEFT JOIN trainers t ON cs.trainer_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
-            WHERE cs.day_of_week = %s AND cs.is_active = 1
+            LEFT JOIN branches b ON cs.branch_id = b.id
+            WHERE cs.day_of_week = %s AND cs.is_active = 1{branch_filter}
             ORDER BY cs.start_time ASC
             """,
-            (today, today, day_of_week_sunday),
+            params,
         )
         schedules = cursor.fetchall()
 

@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, get_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ def get_my_pt_bookings(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get PT bookings assigned to this trainer"""
     conn = get_db_connection()
@@ -73,6 +74,10 @@ def get_my_pt_bookings(
             where_clauses.append("pb.booking_date <= %s")
             params.append(date_to)
 
+        if branch_id:
+            where_clauses.append("pb.branch_id = %s")
+            params.append(branch_id)
+
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
         # Count
@@ -84,11 +89,13 @@ def get_my_pt_bookings(
         cursor.execute(
             f"""
             SELECT pb.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
-                   pp.name as package_name, pp.session_duration
+                   pp.name as package_name, pp.session_duration,
+                   br.name as branch_name, br.code as branch_code
             FROM pt_bookings pb
             JOIN users u ON pb.user_id = u.id
             JOIN member_pt_sessions mps ON pb.member_pt_session_id = mps.id
             JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            LEFT JOIN branches br ON pb.branch_id = br.id
             {where_sql}
             ORDER BY pb.booking_date ASC, pb.start_time ASC
             LIMIT %s OFFSET %s
@@ -126,7 +133,10 @@ def get_my_pt_bookings(
 
 
 @router.get("/bookings/today")
-def get_today_pt_bookings(auth: dict = Depends(verify_bearer_token)):
+def get_today_pt_bookings(
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
+):
     """Get today's PT bookings for this trainer"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -135,19 +145,28 @@ def get_today_pt_bookings(auth: dict = Depends(verify_bearer_token)):
         trainer_id = _get_trainer_id(cursor, auth["user_id"])
         today = date.today()
 
+        branch_filter = ""
+        query_params = [trainer_id, today]
+        if branch_id:
+            branch_filter = "AND pb.branch_id = %s"
+            query_params.append(branch_id)
+
         cursor.execute(
-            """
+            f"""
             SELECT pb.*, u.name as member_name, u.phone as member_phone,
                    pp.name as package_name, pp.session_duration,
-                   mps.remaining_sessions
+                   mps.remaining_sessions,
+                   br.name as branch_name, br.code as branch_code
             FROM pt_bookings pb
             JOIN users u ON pb.user_id = u.id
             JOIN member_pt_sessions mps ON pb.member_pt_session_id = mps.id
             JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            LEFT JOIN branches br ON pb.branch_id = br.id
             WHERE pb.trainer_id = %s AND pb.booking_date = %s
+            {branch_filter}
             ORDER BY pb.start_time ASC
             """,
-            (trainer_id, today),
+            query_params,
         )
         bookings = cursor.fetchall()
 

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,10 @@ def generate_membership_code():
     return f"MBR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
 
-def generate_transaction_code():
-    """Generate unique transaction code"""
-    return f"TRX-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+def generate_transaction_code(branch_code: str = ""):
+    """Generate unique transaction code with branch code"""
+    prefix = f"TRX-{branch_code}-" if branch_code else "TRX-"
+    return f"{prefix}{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
 
 
 # ============== Endpoints ==============
@@ -219,9 +220,10 @@ def get_membership_detail(
 @router.post("")
 def create_membership(
     request: CreateMembershipRequest,
-    auth: dict = Depends(verify_bearer_token)
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
-    """Create membership for a user (admin)"""
+    """Create membership for a user (admin). Requires branch context for transaction."""
     check_permission(auth, "member.create")
 
     conn = get_db_connection()
@@ -278,17 +280,23 @@ def create_membership(
         tax_amount = subtotal * (tax_percentage / 100) if tax_enabled else 0
         grand_total = subtotal + tax_amount
 
+        # Get branch code for transaction code
+        cursor.execute("SELECT code FROM branches WHERE id = %s", (branch_id,))
+        branch_row = cursor.fetchone()
+        branch_code = branch_row["code"] if branch_row else ""
+
         # Create transaction
-        transaction_code = generate_transaction_code()
+        transaction_code = generate_transaction_code(branch_code)
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, staff_id, subtotal, subtotal_after_discount,
+            (branch_id, transaction_code, user_id, staff_id, subtotal, subtotal_after_discount,
              tax_percentage, tax_amount, grand_total, payment_method, payment_status,
              paid_amount, paid_at, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 transaction_code,
                 request.user_id,
                 auth["user_id"],  # staff

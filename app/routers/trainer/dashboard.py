@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, get_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,10 @@ def _get_trainer_id(cursor, user_id: int) -> int:
 
 
 @router.get("/summary")
-def get_dashboard_summary(auth: dict = Depends(verify_bearer_token)):
+def get_dashboard_summary(
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
+):
     """Get trainer dashboard summary (today's stats)"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -38,45 +41,51 @@ def get_dashboard_summary(auth: dict = Depends(verify_bearer_token)):
         today = date.today()
 
         # Today's PT bookings
-        cursor.execute(
-            """
+        pt_today_sql = """
             SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN status = 'booked' THEN 1 END) as upcoming,
-                   COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed
-            FROM pt_bookings
-            WHERE trainer_id = %s AND booking_date = %s
-            """,
-            (trainer_id, today),
-        )
+                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
+                   COUNT(CASE WHEN pb.status = 'completed' THEN 1 END) as completed
+            FROM pt_bookings pb
+            WHERE pb.trainer_id = %s AND pb.booking_date = %s
+        """
+        pt_today_params = [trainer_id, today]
+        if branch_id:
+            pt_today_sql += " AND pb.branch_id = %s"
+            pt_today_params.append(branch_id)
+        cursor.execute(pt_today_sql, pt_today_params)
         pt_today = cursor.fetchone()
 
         # This week's PT bookings
         week_start = today - timedelta(days=today.weekday())
         week_end = week_start + timedelta(days=6)
-        cursor.execute(
-            """
+        pt_week_sql = """
             SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN status = 'booked' THEN 1 END) as upcoming,
-                   COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed
-            FROM pt_bookings
-            WHERE trainer_id = %s AND booking_date BETWEEN %s AND %s
-            """,
-            (trainer_id, week_start, week_end),
-        )
+                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
+                   COUNT(CASE WHEN pb.status = 'completed' THEN 1 END) as completed
+            FROM pt_bookings pb
+            WHERE pb.trainer_id = %s AND pb.booking_date BETWEEN %s AND %s
+        """
+        pt_week_params = [trainer_id, week_start, week_end]
+        if branch_id:
+            pt_week_sql += " AND pb.branch_id = %s"
+            pt_week_params.append(branch_id)
+        cursor.execute(pt_week_sql, pt_week_params)
         pt_week = cursor.fetchone()
 
         # Today's class schedules
         day_of_week = today.weekday() + 1  # 0=Sunday in DB, Python monday=0
         if day_of_week == 7:
             day_of_week = 0
-        cursor.execute(
-            """
+        classes_today_sql = """
             SELECT COUNT(*) as total
-            FROM class_schedules
-            WHERE trainer_id = %s AND day_of_week = %s AND is_active = 1
-            """,
-            (trainer_id, day_of_week),
-        )
+            FROM class_schedules cs
+            WHERE cs.trainer_id = %s AND cs.day_of_week = %s AND cs.is_active = 1
+        """
+        classes_today_params = [trainer_id, day_of_week]
+        if branch_id:
+            classes_today_sql += " AND cs.branch_id = %s"
+            classes_today_params.append(branch_id)
+        cursor.execute(classes_today_sql, classes_today_params)
         classes_today = cursor.fetchone()["total"]
 
         # Active clients (unique members with active PT sessions)
@@ -126,6 +135,7 @@ def get_my_class_schedule(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get trainer's class schedules"""
     conn = get_db_connection()
@@ -140,16 +150,20 @@ def get_my_class_schedule(
             date_to = date_from + timedelta(days=7)
 
         # Get recurring schedules
-        cursor.execute(
-            """
-            SELECT cs.*, ct.name as class_name, ct.description as class_description
+        recurring_sql = """
+            SELECT cs.*, ct.name as class_name, ct.description as class_description,
+                   br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
+            LEFT JOIN branches br ON cs.branch_id = br.id
             WHERE cs.trainer_id = %s AND cs.is_active = 1 AND cs.is_recurring = 1
-            ORDER BY cs.day_of_week ASC, cs.start_time ASC
-            """,
-            (trainer_id,),
-        )
+        """
+        recurring_params = [trainer_id]
+        if branch_id:
+            recurring_sql += " AND cs.branch_id = %s"
+            recurring_params.append(branch_id)
+        recurring_sql += " ORDER BY cs.day_of_week ASC, cs.start_time ASC"
+        cursor.execute(recurring_sql, recurring_params)
         recurring = cursor.fetchall()
 
         # Build schedule per date
@@ -184,6 +198,8 @@ def get_my_class_schedule(
                         "room": s["room"],
                         "capacity": s["capacity"],
                         "booked": booked,
+                        "branch_name": s["branch_name"],
+                        "branch_code": s["branch_code"],
                     })
 
             if day_classes:

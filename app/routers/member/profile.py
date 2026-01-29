@@ -28,6 +28,10 @@ class UpdateProfileRequest(BaseModel):
     emergency_contact_phone: Optional[str] = None
 
 
+class SetDefaultBranchRequest(BaseModel):
+    branch_id: Optional[int] = Field(None, description="ID cabang default, null untuk hapus default")
+
+
 # ============== Endpoints ==============
 
 @router.get("")
@@ -39,11 +43,13 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             """
-            SELECT id, email, name, phone, address, birth_date, gender,
-                   emergency_contact_name, emergency_contact_phone, profile_photo,
-                   email_verified, has_pin, created_at
-            FROM users
-            WHERE id = %s
+            SELECT u.id, u.email, u.name, u.phone, u.address, u.birth_date, u.gender,
+                   u.emergency_contact_name, u.emergency_contact_phone, u.profile_photo,
+                   u.email_verified, u.has_pin, u.default_branch_id, u.created_at,
+                   b.code as default_branch_code, b.name as default_branch_name
+            FROM users u
+            LEFT JOIN branches b ON u.default_branch_id = b.id
+            WHERE u.id = %s
             """,
             (auth["user_id"],),
         )
@@ -57,6 +63,20 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
 
         user["email_verified"] = bool(user.get("email_verified"))
         user["has_pin"] = bool(user.get("has_pin"))
+
+        # Build default branch info
+        default_branch = None
+        if user.get("default_branch_id"):
+            default_branch = {
+                "id": user.pop("default_branch_id"),
+                "code": user.pop("default_branch_code"),
+                "name": user.pop("default_branch_name"),
+            }
+        else:
+            user.pop("default_branch_id", None)
+            user.pop("default_branch_code", None)
+            user.pop("default_branch_name", None)
+        user["default_branch"] = default_branch
 
         # Get active membership
         cursor.execute(
@@ -150,6 +170,65 @@ def update_my_profile(request: UpdateProfileRequest, auth: dict = Depends(verify
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "UPDATE_PROFILE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.put("/default-branch")
+def set_default_branch(request: SetDefaultBranchRequest, auth: dict = Depends(verify_bearer_token)):
+    """Set or change member's default branch"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # If branch_id provided, validate it exists and is active
+        if request.branch_id is not None:
+            cursor.execute(
+                "SELECT id, code, name FROM branches WHERE id = %s AND is_active = 1",
+                (request.branch_id,),
+            )
+            branch = cursor.fetchone()
+            if not branch:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "BRANCH_NOT_FOUND", "message": "Cabang tidak ditemukan atau tidak aktif"},
+                )
+
+        cursor.execute(
+            "UPDATE users SET default_branch_id = %s, updated_at = %s WHERE id = %s",
+            (request.branch_id, datetime.now(), auth["user_id"]),
+        )
+        conn.commit()
+
+        if request.branch_id is None:
+            return {
+                "success": True,
+                "message": "Default cabang berhasil dihapus",
+                "data": {"default_branch": None},
+            }
+
+        return {
+            "success": True,
+            "message": f"Default cabang berhasil diubah ke {branch['name']}",
+            "data": {
+                "default_branch": {
+                    "id": branch["id"],
+                    "code": branch["code"],
+                    "name": branch["name"],
+                },
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error setting default branch: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "SET_BRANCH_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

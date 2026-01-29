@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, verify_pin_token, check_permission
+from app.middleware import verify_bearer_token, verify_pin_token, check_permission, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +46,12 @@ class RefundRequest(BaseModel):
 
 # ============== Helper Functions ==============
 
-def generate_transaction_code():
-    return f"TRX-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+def generate_transaction_code(branch_code: str = ""):
+    prefix = f"TRX-{branch_code}-" if branch_code else "TRX-"
+    return f"{prefix}{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
 
 
-def get_item_details(cursor, item_type: str, item_id: int):
+def get_item_details(cursor, item_type: str, item_id: int, branch_id: int = None):
     """Get item details based on type"""
     if item_type == "membership":
         cursor.execute(
@@ -68,10 +69,21 @@ def get_item_details(cursor, item_type: str, item_id: int):
             (item_id,),
         )
     elif item_type in ("product", "rental"):
-        cursor.execute(
-            "SELECT id, name, price, stock, is_rental FROM products WHERE id = %s AND is_active = 1",
-            (item_id,),
-        )
+        if branch_id:
+            cursor.execute(
+                """
+                SELECT p.id, p.name, p.price, bps.stock, p.is_rental
+                FROM products p
+                LEFT JOIN branch_product_stock bps ON bps.product_id = p.id AND bps.branch_id = %s
+                WHERE p.id = %s AND p.is_active = 1
+                """,
+                (branch_id, item_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT id, name, price, stock, is_rental FROM products WHERE id = %s AND is_active = 1",
+                (item_id,),
+            )
     else:
         return None
 
@@ -84,6 +96,7 @@ def get_item_details(cursor, item_type: str, item_id: int):
 def checkout(
     request: CheckoutRequest,
     auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
     """
     Create a new transaction with multiple items.
@@ -94,6 +107,16 @@ def checkout(
 
     try:
         user_id = auth.get("user_id")
+
+        # Get branch code
+        cursor.execute("SELECT code FROM branches WHERE id = %s", (branch_id,))
+        branch_row = cursor.fetchone()
+        if not branch_row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BRANCH_NOT_FOUND", "message": "Branch tidak ditemukan"},
+            )
+        branch_code = branch_row["code"]
 
         # Get tax settings
         cursor.execute(
@@ -110,7 +133,7 @@ def checkout(
         subtotal = 0
 
         for item in request.items:
-            item_details = get_item_details(cursor, item.item_type, item.item_id)
+            item_details = get_item_details(cursor, item.item_type, item.item_id, branch_id=branch_id)
 
             if not item_details:
                 raise HTTPException(
@@ -123,7 +146,8 @@ def checkout(
 
             # Check stock for products
             if item.item_type == "product" and not item_details.get("is_rental"):
-                if item_details["stock"] < item.quantity:
+                current_stock = item_details.get("stock") or 0
+                if current_stock < item.quantity:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail={
@@ -207,18 +231,19 @@ def checkout(
         grand_total = subtotal_after_discount + tax_amount + service_charge_amount
 
         # Create transaction
-        transaction_code = generate_transaction_code()
+        transaction_code = generate_transaction_code(branch_code)
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, staff_id, customer_name, customer_phone, customer_email,
+            (transaction_code, branch_id, user_id, staff_id, customer_name, customer_phone, customer_email,
              subtotal, discount_type, discount_value, discount_amount, subtotal_after_discount,
              tax_percentage, tax_amount, service_charge_percentage, service_charge_amount,
              grand_total, payment_method, payment_status, paid_amount, paid_at, voucher_code, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 transaction_code,
+                branch_id,
                 user_id if user_id and not request.customer_name else None,  # Member purchase
                 auth["user_id"] if request.customer_name else None,  # Staff for walk-in
                 request.customer_name,
@@ -277,11 +302,19 @@ def checkout(
             target_user_id = user_id if user_id and not request.customer_name else None
 
             if item["item_type"] == "product" and not item["details"].get("is_rental"):
-                # Deduct stock
+                # Deduct stock from branch_product_stock
                 cursor.execute(
-                    "UPDATE products SET stock = stock - %s WHERE id = %s",
-                    (item["quantity"], item["item_id"]),
+                    "UPDATE branch_product_stock SET stock = stock - %s WHERE branch_id = %s AND product_id = %s AND stock >= %s",
+                    (item["quantity"], branch_id, item["item_id"], item["quantity"]),
                 )
+                if cursor.rowcount == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "INSUFFICIENT_STOCK",
+                            "message": f"Stok {item['item_name']} tidak mencukupi di cabang ini",
+                        },
+                    )
 
                 # Log stock change
                 cursor.execute(
@@ -421,7 +454,15 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
 
     try:
         # Get transaction
-        cursor.execute("SELECT * FROM transactions WHERE id = %s", (transaction_id,))
+        cursor.execute(
+            """
+            SELECT t.*, b.name as branch_name, b.code as branch_code
+            FROM transactions t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            WHERE t.id = %s
+            """,
+            (transaction_id,),
+        )
         transaction = cursor.fetchone()
 
         if not transaction:
@@ -487,6 +528,7 @@ def get_all_transactions(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get all transactions (CMS)"""
     check_permission(auth, "transaction.view")
@@ -497,6 +539,10 @@ def get_all_transactions(
     try:
         where_clauses = []
         params = []
+
+        if branch_id:
+            where_clauses.append("t.branch_id = %s")
+            params.append(branch_id)
 
         if user_id:
             where_clauses.append("t.user_id = %s")
@@ -547,10 +593,12 @@ def get_all_transactions(
         cursor.execute(
             f"""
             SELECT t.*, u.name as member_name, u.email as member_email,
-                   s.name as staff_name
+                   s.name as staff_name,
+                   b.name as branch_name, b.code as branch_code
             FROM transactions t
             LEFT JOIN users u ON t.user_id = u.id
             LEFT JOIN users s ON t.staff_id = s.id
+            LEFT JOIN branches b ON t.branch_id = b.id
             {where_sql}
             ORDER BY t.created_at DESC
             LIMIT %s OFFSET %s

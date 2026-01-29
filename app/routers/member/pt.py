@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,7 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
 @router.get("/trainers")
 def get_available_trainers(
     specialization: Optional[str] = Query(None),
+    branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
     """Get available trainers"""
@@ -117,6 +118,11 @@ def get_available_trainers(
     try:
         where_clause = "t.is_active = 1"
         params = []
+        join_clause = ""
+
+        if branch_id:
+            join_clause = " JOIN trainer_branches tb ON t.id = tb.trainer_id AND tb.branch_id = %s"
+            params.append(branch_id)
 
         if specialization:
             where_clause += " AND t.specialization LIKE %s"
@@ -127,6 +133,7 @@ def get_available_trainers(
             SELECT t.id, t.specialization, t.bio,
                    u.name, u.email, u.phone, u.avatar as profile_photo
             FROM trainers t
+            {join_clause}
             JOIN users u ON t.user_id = u.id
             WHERE {where_clause}
             ORDER BY u.name ASC
@@ -156,6 +163,7 @@ def get_trainer_availability(
     trainer_id: int,
     date_from: date = Query(default_factory=date.today),
     date_to: Optional[date] = Query(None),
+    branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
     """Get trainer availability for booking"""
@@ -179,14 +187,21 @@ def get_trainer_availability(
             )
 
         # Get booked slots
+        booked_where = "trainer_id = %s AND booking_date BETWEEN %s AND %s AND status IN ('booked', 'completed')"
+        booked_params = [trainer_id, date_from, date_to]
+
+        if branch_id:
+            booked_where += " AND branch_id = %s"
+            booked_params.append(branch_id)
+
         cursor.execute(
-            """
+            f"""
             SELECT booking_date, start_time, end_time
             FROM pt_bookings
-            WHERE trainer_id = %s AND booking_date BETWEEN %s AND %s AND status IN ('booked', 'completed')
+            WHERE {booked_where}
             ORDER BY booking_date, start_time
             """,
-            (trainer_id, date_from, date_to),
+            booked_params,
         )
         booked_slots = cursor.fetchall()
 
@@ -227,7 +242,7 @@ def get_trainer_availability(
 
 
 @router.post("/book")
-def book_pt_session(request: BookPTRequest, auth: dict = Depends(verify_bearer_token)):
+def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_branch_id), auth: dict = Depends(verify_bearer_token)):
     """Book a PT session"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -270,6 +285,17 @@ def book_pt_session(request: BookPTRequest, auth: dict = Depends(verify_bearer_t
                 detail={"error_code": "TRAINER_NOT_FOUND", "message": "Trainer tidak ditemukan"},
             )
 
+        # Check trainer is assigned to this branch
+        cursor.execute(
+            "SELECT id FROM trainer_branches WHERE trainer_id = %s AND branch_id = %s",
+            (request.trainer_id, branch_id),
+        )
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "TRAINER_NOT_IN_BRANCH", "message": "Trainer tidak tersedia di cabang ini"},
+            )
+
         # Check booking date not in past
         if request.booking_date < date.today():
             raise HTTPException(
@@ -301,10 +327,11 @@ def book_pt_session(request: BookPTRequest, auth: dict = Depends(verify_bearer_t
         cursor.execute(
             """
             INSERT INTO pt_bookings
-            (pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (branch_id, pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 request.pt_session_id,
                 user_id,
                 request.trainer_id,
@@ -390,10 +417,12 @@ def get_my_pt_bookings(
         offset = (page - 1) * limit
         cursor.execute(
             f"""
-            SELECT pb.*, u.name as trainer_name
+            SELECT pb.*, u.name as trainer_name,
+                   br.name as branch_name, br.code as branch_code
             FROM pt_bookings pb
             JOIN trainers t ON pb.trainer_id = t.id
             JOIN users u ON t.user_id = u.id
+            LEFT JOIN branches br ON pb.branch_id = br.id
             {where_sql}
             ORDER BY pb.booking_date ASC, pb.start_time ASC
             LIMIT %s OFFSET %s

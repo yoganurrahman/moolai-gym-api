@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 
@@ -478,3 +478,74 @@ def check_permission(auth: dict, permission_name: str) -> None:
             "message": f"Anda tidak memiliki akses untuk operasi ini",
         },
     )
+
+
+# ============== Branch Context Dependencies ==============
+
+
+def get_branch_id(
+    x_branch_id: Optional[int] = Header(None, alias="X-Branch-Id"),
+    branch_id: Optional[int] = Query(None, alias="branch_id"),
+) -> Optional[int]:
+    """
+    Extract optional branch_id from X-Branch-Id header or ?branch_id= query param.
+    Header takes priority. Returns None if not provided.
+    Used for optional filtering (e.g. list endpoints).
+    """
+    bid = x_branch_id or branch_id
+    if bid is not None:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                "SELECT id FROM branches WHERE id = %s AND is_active = 1", (bid,)
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "INVALID_BRANCH",
+                        "message": "Cabang tidak ditemukan atau tidak aktif",
+                    },
+                )
+        finally:
+            cursor.close()
+            conn.close()
+    return bid
+
+
+def require_branch_id(
+    x_branch_id: Optional[int] = Header(None, alias="X-Branch-Id"),
+    branch_id: Optional[int] = Query(None, alias="branch_id"),
+) -> int:
+    """
+    Extract required branch_id from X-Branch-Id header or ?branch_id= query param.
+    Raises 400 if not provided. Used for write operations that must specify a branch.
+    """
+    bid = x_branch_id or branch_id
+    if bid is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "BRANCH_REQUIRED",
+                "message": "branch_id diperlukan. Pilih cabang terlebih dahulu.",
+            },
+        )
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id FROM branches WHERE id = %s AND is_active = 1", (bid,)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "INVALID_BRANCH",
+                    "message": "Cabang tidak ditemukan atau tidak aktif",
+                },
+            )
+    finally:
+        cursor.close()
+        conn.close()
+    return bid

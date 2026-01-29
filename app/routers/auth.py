@@ -253,12 +253,12 @@ def login(request: LoginRequest):
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # Get user by email (including PIN status)
+        # Get user by email (including PIN status and branch)
         cursor.execute(
             """
             SELECT u.id, u.name, u.email, u.password, u.phone, u.is_active,
                    u.role_id, u.token_version, u.failed_login_attempts, u.locked_until,
-                   u.has_pin,
+                   u.has_pin, u.default_branch_id,
                    r.name as role_name
             FROM users u
             LEFT JOIN roles r ON u.role_id = r.id
@@ -367,6 +367,50 @@ def login(request: LoginRequest):
         has_pin = bool(user.get("has_pin"))
         requires_pin = not has_pin
 
+        # Get accessible branches based on role
+        role_name = (user["role_name"] or "member").lower()
+        if role_name in ("superadmin", "admin", "member"):
+            # Superadmin/Admin: all active branches; Member: can visit all branches
+            cursor.execute(
+                "SELECT id, code, name, city FROM branches WHERE is_active = 1 ORDER BY sort_order ASC"
+            )
+            accessible_branches = cursor.fetchall()
+        elif role_name == "trainer":
+            # Trainer: only assigned branches
+            cursor.execute(
+                """
+                SELECT b.id, b.code, b.name, b.city
+                FROM trainer_branches tb
+                JOIN branches b ON tb.branch_id = b.id
+                WHERE tb.trainer_id = (SELECT id FROM trainers WHERE user_id = %s LIMIT 1)
+                  AND b.is_active = 1
+                ORDER BY tb.is_primary DESC, b.sort_order ASC
+                """,
+                (user["id"],),
+            )
+            accessible_branches = cursor.fetchall()
+        elif role_name == "staff":
+            # Staff: default branch only
+            if user["default_branch_id"]:
+                cursor.execute(
+                    "SELECT id, code, name, city FROM branches WHERE id = %s AND is_active = 1",
+                    (user["default_branch_id"],),
+                )
+                accessible_branches = cursor.fetchall()
+            else:
+                accessible_branches = []
+        else:
+            accessible_branches = []
+
+        # Get default branch info
+        default_branch = None
+        if user.get("default_branch_id"):
+            cursor.execute(
+                "SELECT id, code, name FROM branches WHERE id = %s",
+                (user["default_branch_id"],),
+            )
+            default_branch = cursor.fetchone()
+
         response = {
             "success": True,
             "message": "Login berhasil" if has_pin else "Login berhasil. Silakan buat PIN untuk melanjutkan.",
@@ -380,7 +424,9 @@ def login(request: LoginRequest):
                 "phone": user["phone"],
                 "role": user["role_name"] or "member",
                 "has_pin": has_pin,
+                "default_branch": default_branch,
             },
+            "branches": accessible_branches,
         }
 
         return response
@@ -680,10 +726,13 @@ def get_current_user(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             """
-            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.created_at,
-                   r.id as role_id, r.name as role_name
+            SELECT u.id, u.name, u.email, u.phone, u.is_active, u.default_branch_id,
+                   u.created_at,
+                   r.id as role_id, r.name as role_name,
+                   b.code as default_branch_code, b.name as default_branch_name
             FROM users u
             LEFT JOIN roles r ON u.role_id = r.id
+            LEFT JOIN branches b ON u.default_branch_id = b.id
             WHERE u.id = %s
             """,
             (auth["user_id"],),
@@ -712,6 +761,15 @@ def get_current_user(auth: dict = Depends(verify_bearer_token)):
         if user["created_at"]:
             user["created_at"] = user["created_at"].isoformat()
 
+        # Build default branch info
+        default_branch = None
+        if user.get("default_branch_id"):
+            default_branch = {
+                "id": user["default_branch_id"],
+                "code": user["default_branch_code"],
+                "name": user["default_branch_name"],
+            }
+
         return {
             "success": True,
             "data": {
@@ -725,6 +783,7 @@ def get_current_user(auth: dict = Depends(verify_bearer_token)):
                     "name": user["role_name"],
                 },
                 "permissions": permissions,
+                "default_branch": default_branch,
                 "created_at": user["created_at"],
             },
         }

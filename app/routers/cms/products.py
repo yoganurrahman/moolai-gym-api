@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +144,9 @@ def get_products(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
-    """Get all products with filters"""
+    """Get all products with filters. When branch_id is provided, includes per-branch stock info."""
     check_permission(auth, "product.view")
 
     conn = get_db_connection()
@@ -168,7 +169,12 @@ def get_products(
             params.append(1 if is_rental else 0)
 
         if low_stock:
-            where_clauses.append("p.stock <= p.min_stock AND p.is_rental = 0")
+            if branch_id:
+                where_clauses.append(
+                    "bps.stock <= bps.min_stock AND p.is_rental = 0"
+                )
+            else:
+                where_clauses.append("p.stock <= p.min_stock AND p.is_rental = 0")
 
         if search:
             where_clauses.append("(p.name LIKE %s OR p.sku LIKE %s)")
@@ -176,22 +182,37 @@ def get_products(
 
         where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
+        # Build branch JOIN clause
+        branch_join = ""
+        branch_select = ""
+        count_join = ""
+        if branch_id:
+            branch_join = " LEFT JOIN branch_product_stock bps ON p.id = bps.product_id AND bps.branch_id = %s"
+            branch_select = ", bps.stock AS branch_stock, bps.min_stock AS branch_min_stock"
+            count_join = branch_join
+
         # Count total
-        cursor.execute(f"SELECT COUNT(*) as total FROM products p{where_sql}", params)
+        count_params = ([branch_id] + params) if branch_id else list(params)
+        cursor.execute(
+            f"SELECT COUNT(*) as total FROM products p{count_join}{where_sql}",
+            count_params,
+        )
         total = cursor.fetchone()["total"]
 
         # Get data
         offset = (page - 1) * limit
+        data_params = ([branch_id] + params + [limit, offset]) if branch_id else (params + [limit, offset])
         cursor.execute(
             f"""
-            SELECT p.*, pc.name as category_name
+            SELECT p.*, pc.name as category_name{branch_select}
             FROM products p
             LEFT JOIN product_categories pc ON p.category_id = pc.id
+            {branch_join}
             {where_sql}
             ORDER BY p.name ASC
             LIMIT %s OFFSET %s
             """,
-            params + [limit, offset],
+            data_params,
         )
         products = cursor.fetchall()
 
@@ -201,6 +222,22 @@ def get_products(
             p["is_active"] = bool(p.get("is_active"))
             p["is_rental"] = bool(p.get("is_rental"))
             p["is_low_stock"] = p["stock"] <= p["min_stock"] if not p["is_rental"] else False
+
+            if branch_id:
+                b_stock = p.get("branch_stock")
+                b_min = p.get("branch_min_stock")
+                p["branch_stock"] = {
+                    "branch_id": branch_id,
+                    "stock": b_stock if b_stock is not None else 0,
+                    "min_stock": b_min if b_min is not None else 0,
+                    "is_low_stock": (
+                        (b_stock or 0) <= (b_min or 0)
+                        if not p["is_rental"] and b_stock is not None
+                        else False
+                    ),
+                }
+                # Remove flat branch columns from top-level
+                p.pop("branch_min_stock", None)
 
         return {
             "success": True,
@@ -499,8 +536,9 @@ def adjust_stock(
     product_id: int,
     request: StockAdjustmentRequest,
     auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
-    """Adjust product stock manually"""
+    """Adjust product stock for a specific branch"""
     check_permission(auth, "product.update")
 
     conn = get_db_connection()
@@ -522,31 +560,49 @@ def adjust_stock(
                 detail={"error_code": "RENTAL_PRODUCT", "message": "Tidak bisa adjust stock untuk produk rental"},
             )
 
-        new_stock = product["stock"] + request.quantity
+        # Get current branch stock (or 0 if no row exists yet)
+        cursor.execute(
+            "SELECT stock FROM branch_product_stock WHERE branch_id = %s AND product_id = %s",
+            (branch_id, product_id),
+        )
+        branch_row = cursor.fetchone()
+        current_stock = branch_row["stock"] if branch_row else 0
+
+        new_stock = current_stock + request.quantity
         if new_stock < 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error_code": "INSUFFICIENT_STOCK", "message": "Stok tidak mencukupi"},
             )
 
-        # Update stock
-        cursor.execute(
-            "UPDATE products SET stock = %s, updated_at = %s WHERE id = %s",
-            (new_stock, datetime.now(), product_id),
-        )
+        # Upsert branch_product_stock
+        if branch_row:
+            cursor.execute(
+                "UPDATE branch_product_stock SET stock = %s WHERE branch_id = %s AND product_id = %s",
+                (new_stock, branch_id, product_id),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO branch_product_stock (branch_id, product_id, stock, min_stock)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (branch_id, product_id, new_stock, product["min_stock"]),
+            )
 
-        # Log
+        # Log with branch_id
         cursor.execute(
             """
             INSERT INTO product_stock_logs
-            (product_id, type, quantity, stock_before, stock_after, reference_type, notes, created_by, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (branch_id, product_id, type, quantity, stock_before, stock_after, reference_type, notes, created_by, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 product_id,
                 "in" if request.quantity > 0 else "out",
                 abs(request.quantity),
-                product["stock"],
+                current_stock,
                 new_stock,
                 "adjustment",
                 request.reason,
@@ -560,7 +616,8 @@ def adjust_stock(
             "success": True,
             "message": "Stok berhasil disesuaikan",
             "data": {
-                "stock_before": product["stock"],
+                "branch_id": branch_id,
+                "stock_before": current_stock,
                 "adjustment": request.quantity,
                 "stock_after": new_stock,
             },

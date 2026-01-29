@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def get_all_checkins(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get all check-ins with filters"""
     check_permission(auth, "checkin.view")
@@ -46,6 +47,10 @@ def get_all_checkins(
     try:
         where_clauses = []
         params = []
+
+        if branch_id:
+            where_clauses.append("mc.branch_id = %s")
+            params.append(branch_id)
 
         if user_id:
             where_clauses.append("mc.user_id = %s")
@@ -80,6 +85,7 @@ def get_all_checkins(
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
             LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN branches b ON mc.branch_id = b.id
             {where_sql}
             """,
             params
@@ -93,7 +99,8 @@ def get_all_checkins(
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
                    mm.membership_code, mp.name as package_name,
                    staff.name as checked_in_by_name,
-                   cpt.name as class_pass_name
+                   cpt.name as class_pass_name,
+                   b.name as branch_name, b.code as branch_code
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
@@ -101,6 +108,7 @@ def get_all_checkins(
             LEFT JOIN users staff ON mc.checked_in_by = staff.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
             LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN branches b ON mc.branch_id = b.id
             {where_sql}
             ORDER BY mc.checkin_time DESC
             LIMIT %s OFFSET %s
@@ -150,6 +158,7 @@ def get_today_checkins(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get today's check-ins with summary"""
     check_permission(auth, "checkin.view")
@@ -161,50 +170,58 @@ def get_today_checkins(
         today_start = datetime.combine(date.today(), datetime.min.time())
         today_end = datetime.combine(date.today(), datetime.max.time())
 
+        branch_filter = ""
+        branch_params = ()
+        if branch_id:
+            branch_filter = " AND mc.branch_id = %s"
+            branch_params = (branch_id,)
+
         # Count total
         cursor.execute(
-            """
-            SELECT COUNT(*) as total FROM member_checkins
-            WHERE checkin_time BETWEEN %s AND %s
+            f"""
+            SELECT COUNT(*) as total FROM member_checkins mc
+            WHERE mc.checkin_time BETWEEN %s AND %s{branch_filter}
             """,
-            (today_start, today_end),
+            (today_start, today_end) + branch_params,
         )
         total = cursor.fetchone()["total"]
 
         # Get data
         offset = (page - 1) * limit
         cursor.execute(
-            """
+            f"""
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
                    mm.membership_code, mp.name as package_name,
-                   cpt.name as class_pass_name
+                   cpt.name as class_pass_name,
+                   b.name as branch_name, b.code as branch_code
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
             LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
-            WHERE mc.checkin_time BETWEEN %s AND %s
+            LEFT JOIN branches b ON mc.branch_id = b.id
+            WHERE mc.checkin_time BETWEEN %s AND %s{branch_filter}
             ORDER BY mc.checkin_time DESC
             LIMIT %s OFFSET %s
             """,
-            (today_start, today_end, limit, offset),
+            (today_start, today_end) + branch_params + (limit, offset),
         )
         checkins = cursor.fetchall()
 
         # Get summary
         cursor.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) as total_checkins,
-                COUNT(DISTINCT user_id) as unique_members,
-                COUNT(CASE WHEN checkout_time IS NULL THEN 1 END) as currently_in,
-                COUNT(CASE WHEN checkin_type = 'gym' THEN 1 END) as gym_checkins,
-                COUNT(CASE WHEN checkin_type = 'class_only' THEN 1 END) as class_only_checkins
-            FROM member_checkins
-            WHERE checkin_time BETWEEN %s AND %s
+                COUNT(DISTINCT mc.user_id) as unique_members,
+                COUNT(CASE WHEN mc.checkout_time IS NULL THEN 1 END) as currently_in,
+                COUNT(CASE WHEN mc.checkin_type = 'gym' THEN 1 END) as gym_checkins,
+                COUNT(CASE WHEN mc.checkin_type = 'class_only' THEN 1 END) as class_only_checkins
+            FROM member_checkins mc
+            WHERE mc.checkin_time BETWEEN %s AND %s{branch_filter}
             """,
-            (today_start, today_end),
+            (today_start, today_end) + branch_params,
         )
         summary = cursor.fetchone()
 
@@ -236,6 +253,7 @@ def get_today_checkins(
 @router.get("/currently-in")
 def get_currently_in_members(
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get members who are currently in the gym"""
     check_permission(auth, "checkin.view")
@@ -244,20 +262,29 @@ def get_currently_in_members(
     cursor = conn.cursor(dictionary=True)
 
     try:
+        branch_filter = ""
+        branch_params = ()
+        if branch_id:
+            branch_filter = " AND mc.branch_id = %s"
+            branch_params = (branch_id,)
+
         cursor.execute(
-            """
+            f"""
             SELECT mc.*, u.name as member_name, u.email as member_email, u.phone as member_phone,
                    mm.membership_code, mp.name as package_name,
-                   cpt.name as class_pass_name
+                   cpt.name as class_pass_name,
+                   b.name as branch_name, b.code as branch_code
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
             LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
-            WHERE mc.checkout_time IS NULL
+            LEFT JOIN branches b ON mc.branch_id = b.id
+            WHERE mc.checkout_time IS NULL{branch_filter}
             ORDER BY mc.checkin_time ASC
-            """
+            """,
+            branch_params,
         )
         members = cursor.fetchall()
 
@@ -287,7 +314,9 @@ def get_currently_in_members(
 
 @router.post("/manual")
 def manual_checkin(
-    request: ManualCheckinRequest, auth: dict = Depends(verify_bearer_token)
+    request: ManualCheckinRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
     """Manual check-in by staff"""
     check_permission(auth, "checkin.create")
@@ -393,11 +422,12 @@ def manual_checkin(
         cursor.execute(
             """
             INSERT INTO member_checkins
-            (user_id, checkin_type, membership_id, class_pass_id,
+            (branch_id, user_id, checkin_type, membership_id, class_pass_id,
              checkin_time, checkin_method, checked_in_by, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 request.user_id,
                 checkin_type,
                 checkin_membership_id,

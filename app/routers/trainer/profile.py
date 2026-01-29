@@ -67,9 +67,11 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
         cursor.execute(
             """
             SELECT cs.id, cs.day_of_week, cs.start_time, cs.end_time, cs.room, cs.capacity,
-                   ct.name as class_name
+                   ct.name as class_name,
+                   br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
+            LEFT JOIN branches br ON cs.branch_id = br.id
             WHERE cs.trainer_id = %s AND cs.is_active = 1
             ORDER BY cs.day_of_week ASC, cs.start_time ASC
             """,
@@ -82,6 +84,22 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
             s["day_name"] = day_names[s["day_of_week"]]
             s["start_time"] = str(s["start_time"])
             s["end_time"] = str(s["end_time"])
+
+        # Get assigned branches
+        cursor.execute(
+            """
+            SELECT b.id, b.code, b.name, b.city, tb.is_primary
+            FROM trainer_branches tb
+            JOIN branches b ON tb.branch_id = b.id
+            WHERE tb.trainer_id = %s AND b.is_active = 1
+            ORDER BY tb.is_primary DESC, b.sort_order ASC
+            """,
+            (profile["trainer_id"],),
+        )
+        branches = cursor.fetchall()
+        for br in branches:
+            br["is_primary"] = bool(br["is_primary"])
+        profile["assigned_branches"] = branches
 
         profile["class_schedules"] = schedules
 

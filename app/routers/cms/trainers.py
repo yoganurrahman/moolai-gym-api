@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ def get_trainers(
     specialization: Optional[str] = Query(None),
     is_active: bool = Query(True),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get all trainers"""
     conn = get_db_connection()
@@ -51,6 +52,7 @@ def get_trainers(
     try:
         where_clauses = []
         params = []
+        join_sql = ""
 
         if is_active:
             where_clauses.append("t.is_active = 1")
@@ -59,6 +61,11 @@ def get_trainers(
             where_clauses.append("t.specialization LIKE %s")
             params.append(f"%{specialization}%")
 
+        if branch_id:
+            join_sql = "JOIN trainer_branches tb ON t.id = tb.trainer_id"
+            where_clauses.append("tb.branch_id = %s")
+            params.append(branch_id)
+
         where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
         cursor.execute(
@@ -66,6 +73,7 @@ def get_trainers(
             SELECT t.*, u.name, u.email, u.phone, u.avatar
             FROM trainers t
             JOIN users u ON t.user_id = u.id
+            {join_sql}
             {where_sql}
             ORDER BY u.name ASC
             """,
@@ -120,6 +128,19 @@ def get_trainer(trainer_id: int, auth: dict = Depends(verify_bearer_token)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "TRAINER_NOT_FOUND", "message": "Trainer tidak ditemukan"},
             )
+
+        # Get assigned branches
+        cursor.execute(
+            """
+            SELECT b.id, b.name, b.code, b.address, tb.assigned_at
+            FROM trainer_branches tb
+            JOIN branches b ON tb.branch_id = b.id
+            WHERE tb.trainer_id = %s
+            ORDER BY b.name ASC
+            """,
+            (trainer_id,),
+        )
+        trainer["branches"] = cursor.fetchall()
 
         # Get PT packages
         cursor.execute(

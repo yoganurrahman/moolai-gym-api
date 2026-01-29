@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,9 @@ def get_pt_packages(
 
 @router.post("/purchase")
 def purchase_pt_package(
-    request: PurchasePTRequest, auth: dict = Depends(verify_bearer_token)
+    request: PurchasePTRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
 ):
     """Purchase a PT package"""
     conn = get_db_connection()
@@ -159,12 +161,13 @@ def purchase_pt_package(
         cursor.execute(
             """
             INSERT INTO transactions
-            (transaction_code, user_id, subtotal, subtotal_after_discount,
+            (branch_id, transaction_code, user_id, subtotal, subtotal_after_discount,
              tax_percentage, tax_amount, grand_total, payment_method, payment_status,
              paid_amount, paid_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 transaction_code,
                 user_id,
                 subtotal,
@@ -259,7 +262,11 @@ def purchase_pt_package(
 
 
 @router.post("/book")
-def book_pt_session(request: BookPTRequest, auth: dict = Depends(verify_bearer_token)):
+def book_pt_session(
+    request: BookPTRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
     """Book a PT session"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -356,10 +363,11 @@ def book_pt_session(request: BookPTRequest, auth: dict = Depends(verify_bearer_t
         cursor.execute(
             """
             INSERT INTO pt_bookings
-            (member_pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (branch_id, member_pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
+                branch_id,
                 pt_session["id"],
                 user_id,
                 pt_session["trainer_id"],
@@ -474,6 +482,7 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
 def get_my_pt_sessions(
     status_filter: Optional[str] = Query(None, alias="status"),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get my PT sessions"""
     conn = get_db_connection()
@@ -508,13 +517,24 @@ def get_my_pt_sessions(
 
         # Get bookings for each session
         for session in sessions:
+            booking_where = ["pb.member_pt_session_id = %s"]
+            booking_params = [session["id"]]
+
+            if branch_id:
+                booking_where.append("pb.branch_id = %s")
+                booking_params.append(branch_id)
+
+            booking_where_sql = " WHERE " + " AND ".join(booking_where)
+
             cursor.execute(
-                """
-                SELECT * FROM pt_bookings
-                WHERE member_pt_session_id = %s
-                ORDER BY booking_date DESC, start_time DESC
+                f"""
+                SELECT pb.*, b.name as branch_name
+                FROM pt_bookings pb
+                LEFT JOIN branches b ON pb.branch_id = b.id
+                {booking_where_sql}
+                ORDER BY pb.booking_date DESC, pb.start_time DESC
                 """,
-                (session["id"],),
+                booking_params,
             )
             session["bookings"] = cursor.fetchall()
 

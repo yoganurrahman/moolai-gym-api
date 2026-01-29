@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token
+from app.middleware import verify_bearer_token, get_branch_id, require_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def get_class_schedules(
     class_type_id: Optional[int] = Query(None),
     date_from: date = Query(default_factory=date.today),
     date_to: Optional[date] = Query(None),
+    branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
     """Get class schedules with availability info"""
@@ -81,17 +82,23 @@ def get_class_schedules(
             where_clauses.append("cs.class_type_id = %s")
             params.append(class_type_id)
 
+        if branch_id:
+            where_clauses.append("cs.branch_id = %s")
+            params.append(branch_id)
+
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
         cursor.execute(
             f"""
             SELECT cs.*,
                    ct.name as class_name, ct.description as class_description, ct.color,
-                   u.name as trainer_name
+                   u.name as trainer_name,
+                   br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
             LEFT JOIN trainers t ON cs.trainer_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
+            LEFT JOIN branches br ON cs.branch_id = br.id
             {where_sql}
             ORDER BY cs.day_of_week ASC, cs.start_time ASC
             """,
@@ -137,6 +144,8 @@ def get_class_schedules(
                         "class_description": schedule["class_description"],
                         "color": schedule["color"],
                         "trainer_name": schedule["trainer_name"],
+                        "branch_name": schedule["branch_name"],
+                        "branch_code": schedule["branch_code"],
                         "start_time": str(schedule["start_time"]),
                         "end_time": str(schedule["end_time"]),
                         "room": schedule["room"],
@@ -317,11 +326,11 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
         cursor.execute(
             """
             INSERT INTO class_bookings
-            (user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
+            (branch_id, user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
              status, booked_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (user_id, request.schedule_id, request.class_date, access_type,
+            (schedule["branch_id"], user_id, request.schedule_id, request.class_date, access_type,
              booking_membership_id, booking_class_pass_id,
              "booked", datetime.now(), datetime.now()),
         )
@@ -493,12 +502,14 @@ def get_my_bookings(
             f"""
             SELECT cb.*, cs.start_time, cs.end_time, cs.room,
                    ct.name as class_name, ct.color,
-                   u.name as trainer_name
+                   u.name as trainer_name,
+                   br.name as branch_name, br.code as branch_code
             FROM class_bookings cb
             JOIN class_schedules cs ON cb.schedule_id = cs.id
             JOIN class_types ct ON cs.class_type_id = ct.id
             LEFT JOIN trainers t ON cs.trainer_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
+            LEFT JOIN branches br ON cb.branch_id = br.id
             {where_sql}
             ORDER BY cb.class_date ASC, cs.start_time ASC
             LIMIT %s OFFSET %s

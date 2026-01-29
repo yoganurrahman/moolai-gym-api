@@ -39,11 +39,13 @@ def get_my_transactions(
         offset = (page - 1) * limit
         cursor.execute(
             """
-            SELECT id, transaction_code, subtotal, discount_amount, tax_amount, grand_total,
-                   payment_method, payment_status, paid_at, created_at
-            FROM transactions
-            WHERE user_id = %s
-            ORDER BY created_at DESC
+            SELECT t.id, t.transaction_code, t.subtotal, t.discount_amount, t.tax_amount, t.grand_total,
+                   t.payment_method, t.payment_status, t.paid_at, t.created_at,
+                   b.name as branch_name, b.code as branch_code
+            FROM transactions t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            WHERE t.user_id = %s
+            ORDER BY t.created_at DESC
             LIMIT %s OFFSET %s
             """,
             (auth["user_id"], limit, offset),
@@ -87,8 +89,10 @@ def get_transaction_detail(transaction_id: int, auth: dict = Depends(verify_bear
     try:
         cursor.execute(
             """
-            SELECT * FROM transactions
-            WHERE id = %s AND user_id = %s
+            SELECT t.*, b.name as branch_name, b.code as branch_code
+            FROM transactions t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            WHERE t.id = %s AND t.user_id = %s
             """,
             (transaction_id, auth["user_id"]),
         )

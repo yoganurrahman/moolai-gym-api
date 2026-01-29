@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 
 from app.db import get_db_connection
-from app.middleware import verify_bearer_token, check_permission
+from app.middleware import verify_bearer_token, check_permission, get_branch_id
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,10 @@ router = APIRouter(prefix="/reports", tags=["CMS - Reports"])
 # ============== Endpoints ==============
 
 @router.get("/dashboard")
-def get_dashboard(auth: dict = Depends(verify_bearer_token)):
+def get_dashboard(
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
+):
     """Get dashboard summary"""
     check_permission(auth, "report.view")
 
@@ -44,32 +47,38 @@ def get_dashboard(auth: dict = Depends(verify_bearer_token)):
         member_stats = cursor.fetchone()
 
         # Revenue stats (this month)
+        branch_filter = "AND branch_id = %s" if branch_id else ""
+        revenue_params = [first_day_of_month, branch_id] if branch_id else [first_day_of_month]
         cursor.execute(
-            """
+            f"""
             SELECT
                 COALESCE(SUM(grand_total), 0) as total_revenue,
                 COUNT(*) as total_transactions,
                 COALESCE(AVG(grand_total), 0) as avg_transaction
             FROM transactions
             WHERE payment_status = 'paid' AND DATE(created_at) >= %s
+            {branch_filter}
             """,
-            (first_day_of_month,),
+            revenue_params,
         )
         revenue_stats = cursor.fetchone()
         revenue_stats["total_revenue"] = float(revenue_stats["total_revenue"])
         revenue_stats["avg_transaction"] = float(revenue_stats["avg_transaction"])
 
         # Today's check-ins
+        checkin_branch_filter = "AND branch_id = %s" if branch_id else ""
+        checkin_params = [today, branch_id] if branch_id else [today]
         cursor.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) as total_checkins,
                 COUNT(DISTINCT user_id) as unique_members,
                 COUNT(CASE WHEN checkout_time IS NULL THEN 1 END) as currently_in
             FROM member_checkins
             WHERE DATE(checkin_time) = %s
+            {checkin_branch_filter}
             """,
-            (today,),
+            checkin_params,
         )
         checkin_stats = cursor.fetchone()
 
@@ -85,24 +94,39 @@ def get_dashboard(auth: dict = Depends(verify_bearer_token)):
         expiring = cursor.fetchone()
 
         # Class bookings today
-        cursor.execute(
-            """
-            SELECT COUNT(*) as total_bookings
-            FROM class_bookings
-            WHERE class_date = %s AND status IN ('booked', 'attended')
-            """,
-            (today,),
-        )
+        if branch_id:
+            cursor.execute(
+                """
+                SELECT COUNT(*) as total_bookings
+                FROM class_bookings cb
+                JOIN class_schedules cs ON cb.schedule_id = cs.id
+                WHERE cb.class_date = %s AND cb.status IN ('booked', 'attended')
+                AND cs.branch_id = %s
+                """,
+                (today, branch_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT COUNT(*) as total_bookings
+                FROM class_bookings
+                WHERE class_date = %s AND status IN ('booked', 'attended')
+                """,
+                (today,),
+            )
         class_stats = cursor.fetchone()
 
         # PT sessions today
+        pt_branch_filter = "AND branch_id = %s" if branch_id else ""
+        pt_params = [today, branch_id] if branch_id else [today]
         cursor.execute(
-            """
+            f"""
             SELECT COUNT(*) as total_pt
             FROM pt_bookings
             WHERE booking_date = %s AND status IN ('booked', 'completed')
+            {pt_branch_filter}
             """,
-            (today,),
+            pt_params,
         )
         pt_stats = cursor.fetchone()
 
@@ -135,6 +159,7 @@ def get_revenue_report(
     date_to: date = Query(...),
     group_by: str = Query("day", pattern=r"^(day|week|month)$"),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get revenue report"""
     check_permission(auth, "report.view")
@@ -146,31 +171,57 @@ def get_revenue_report(
         # Group by format
         if group_by == "day":
             date_format = "%Y-%m-%d"
-            group_sql = "DATE(created_at)"
+            group_sql = "DATE(t.created_at)"
         elif group_by == "week":
             date_format = "%Y-%W"
-            group_sql = "YEARWEEK(created_at)"
+            group_sql = "YEARWEEK(t.created_at)"
         else:  # month
             date_format = "%Y-%m"
-            group_sql = "DATE_FORMAT(created_at, '%Y-%m')"
+            group_sql = "DATE_FORMAT(t.created_at, '%Y-%m')"
+
+        # Branch filter
+        branch_filter = "AND t.branch_id = %s" if branch_id else ""
+        base_params = [date_from, date_to, branch_id] if branch_id else [date_from, date_to]
 
         # Revenue by period
-        cursor.execute(
-            f"""
-            SELECT
-                {group_sql} as period,
-                COUNT(*) as transaction_count,
-                SUM(grand_total) as revenue,
-                SUM(tax_amount) as tax_collected,
-                SUM(discount_amount) as discount_given
-            FROM transactions
-            WHERE payment_status = 'paid'
-            AND DATE(created_at) BETWEEN %s AND %s
-            GROUP BY {group_sql}
-            ORDER BY period ASC
-            """,
-            (date_from, date_to),
-        )
+        if branch_id:
+            cursor.execute(
+                f"""
+                SELECT
+                    {group_sql} as period,
+                    COUNT(*) as transaction_count,
+                    SUM(t.grand_total) as revenue,
+                    SUM(t.tax_amount) as tax_collected,
+                    SUM(t.discount_amount) as discount_given
+                FROM transactions t
+                WHERE t.payment_status = 'paid'
+                AND DATE(t.created_at) BETWEEN %s AND %s
+                {branch_filter}
+                GROUP BY {group_sql}
+                ORDER BY period ASC
+                """,
+                base_params,
+            )
+        else:
+            # Superadmin: show per-branch breakdown
+            cursor.execute(
+                f"""
+                SELECT
+                    {group_sql} as period,
+                    b.name as branch_name,
+                    COUNT(*) as transaction_count,
+                    SUM(t.grand_total) as revenue,
+                    SUM(t.tax_amount) as tax_collected,
+                    SUM(t.discount_amount) as discount_given
+                FROM transactions t
+                LEFT JOIN branches b ON t.branch_id = b.id
+                WHERE t.payment_status = 'paid'
+                AND DATE(t.created_at) BETWEEN %s AND %s
+                GROUP BY {group_sql}, t.branch_id
+                ORDER BY period ASC, branch_name ASC
+                """,
+                base_params,
+            )
         revenue_by_period = cursor.fetchall()
 
         for r in revenue_by_period:
@@ -180,7 +231,7 @@ def get_revenue_report(
 
         # Revenue by item type
         cursor.execute(
-            """
+            f"""
             SELECT
                 ti.item_type,
                 COUNT(*) as item_count,
@@ -189,10 +240,11 @@ def get_revenue_report(
             JOIN transactions t ON ti.transaction_id = t.id
             WHERE t.payment_status = 'paid'
             AND DATE(t.created_at) BETWEEN %s AND %s
+            {branch_filter}
             GROUP BY ti.item_type
             ORDER BY revenue DESC
             """,
-            (date_from, date_to),
+            base_params,
         )
         revenue_by_type = cursor.fetchall()
 
@@ -201,18 +253,19 @@ def get_revenue_report(
 
         # Payment method breakdown
         cursor.execute(
-            """
+            f"""
             SELECT
-                payment_method,
+                t.payment_method,
                 COUNT(*) as transaction_count,
-                SUM(grand_total) as revenue
-            FROM transactions
-            WHERE payment_status = 'paid'
-            AND DATE(created_at) BETWEEN %s AND %s
-            GROUP BY payment_method
+                SUM(t.grand_total) as revenue
+            FROM transactions t
+            WHERE t.payment_status = 'paid'
+            AND DATE(t.created_at) BETWEEN %s AND %s
+            {branch_filter}
+            GROUP BY t.payment_method
             ORDER BY revenue DESC
             """,
-            (date_from, date_to),
+            base_params,
         )
         by_payment_method = cursor.fetchall()
 
@@ -221,31 +274,59 @@ def get_revenue_report(
 
         # Summary
         cursor.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) as total_transactions,
-                COALESCE(SUM(grand_total), 0) as total_revenue,
-                COALESCE(SUM(tax_amount), 0) as total_tax,
-                COALESCE(SUM(discount_amount), 0) as total_discount,
-                COALESCE(AVG(grand_total), 0) as avg_transaction
-            FROM transactions
-            WHERE payment_status = 'paid'
-            AND DATE(created_at) BETWEEN %s AND %s
+                COALESCE(SUM(t.grand_total), 0) as total_revenue,
+                COALESCE(SUM(t.tax_amount), 0) as total_tax,
+                COALESCE(SUM(t.discount_amount), 0) as total_discount,
+                COALESCE(AVG(t.grand_total), 0) as avg_transaction
+            FROM transactions t
+            WHERE t.payment_status = 'paid'
+            AND DATE(t.created_at) BETWEEN %s AND %s
+            {branch_filter}
             """,
-            (date_from, date_to),
+            base_params,
         )
         summary = cursor.fetchone()
         for key in ["total_revenue", "total_tax", "total_discount", "avg_transaction"]:
             summary[key] = float(summary[key])
 
+        # Per-branch revenue breakdown for superadmin (no branch_id filter)
+        by_branch = None
+        if not branch_id:
+            cursor.execute(
+                """
+                SELECT
+                    b.id as branch_id,
+                    b.name as branch_name,
+                    COUNT(*) as transaction_count,
+                    COALESCE(SUM(t.grand_total), 0) as revenue
+                FROM transactions t
+                LEFT JOIN branches b ON t.branch_id = b.id
+                WHERE t.payment_status = 'paid'
+                AND DATE(t.created_at) BETWEEN %s AND %s
+                GROUP BY t.branch_id
+                ORDER BY revenue DESC
+                """,
+                base_params,
+            )
+            by_branch = cursor.fetchall()
+            for r in by_branch:
+                r["revenue"] = float(r["revenue"]) if r.get("revenue") else 0
+
+        result_data = {
+            "summary": summary,
+            "by_period": revenue_by_period,
+            "by_type": revenue_by_type,
+            "by_payment_method": by_payment_method,
+        }
+        if by_branch is not None:
+            result_data["by_branch"] = by_branch
+
         return {
             "success": True,
-            "data": {
-                "summary": summary,
-                "by_period": revenue_by_period,
-                "by_type": revenue_by_type,
-                "by_payment_method": by_payment_method,
-            },
+            "data": result_data,
         }
 
     except Exception as e:
@@ -264,6 +345,7 @@ def get_members_report(
     date_from: date = Query(...),
     date_to: date = Query(...),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get members report"""
     check_permission(auth, "report.view")
@@ -272,54 +354,71 @@ def get_members_report(
     cursor = conn.cursor(dictionary=True)
 
     try:
+        # Branch filtering via transaction_id -> transactions.branch_id
+        branch_join = "LEFT JOIN transactions t ON mm.transaction_id = t.id" if branch_id else ""
+        branch_filter = "AND t.branch_id = %s" if branch_id else ""
+
         # New members by day
+        new_members_params = [date_from, date_to, branch_id] if branch_id else [date_from, date_to]
         cursor.execute(
-            """
+            f"""
             SELECT
-                DATE(created_at) as date,
+                DATE(mm.created_at) as date,
                 COUNT(*) as new_members
-            FROM member_memberships
-            WHERE DATE(created_at) BETWEEN %s AND %s
-            GROUP BY DATE(created_at)
+            FROM member_memberships mm
+            {branch_join}
+            WHERE DATE(mm.created_at) BETWEEN %s AND %s
+            {branch_filter}
+            GROUP BY DATE(mm.created_at)
             ORDER BY date ASC
             """,
-            (date_from, date_to),
+            new_members_params,
         )
         new_members = cursor.fetchall()
 
         # Members by package
+        by_package_params = [branch_id] if branch_id else []
         cursor.execute(
-            """
+            f"""
             SELECT
                 mp.name as package_name,
                 COUNT(*) as member_count
             FROM member_memberships mm
             JOIN membership_packages mp ON mm.package_id = mp.id
+            {branch_join}
             WHERE mm.status = 'active'
+            {branch_filter}
             GROUP BY mp.id
             ORDER BY member_count DESC
             """,
+            by_package_params,
         )
         by_package = cursor.fetchall()
 
         # Member retention (renewed vs churned)
+        retention_params = [date_from, date_to, branch_id] if branch_id else [date_from, date_to]
         cursor.execute(
-            """
+            f"""
             SELECT
-                COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
-                COUNT(CASE WHEN status = 'expired' THEN 1 END) as expired,
-                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
-                COUNT(CASE WHEN status = 'frozen' THEN 1 END) as frozen
-            FROM member_memberships
-            WHERE DATE(created_at) BETWEEN %s AND %s
+                COUNT(CASE WHEN mm.status = 'active' THEN 1 END) as active,
+                COUNT(CASE WHEN mm.status = 'expired' THEN 1 END) as expired,
+                COUNT(CASE WHEN mm.status = 'cancelled' THEN 1 END) as cancelled,
+                COUNT(CASE WHEN mm.status = 'frozen' THEN 1 END) as frozen
+            FROM member_memberships mm
+            {branch_join}
+            WHERE DATE(mm.created_at) BETWEEN %s AND %s
+            {branch_filter}
             """,
-            (date_from, date_to),
+            retention_params,
         )
         retention = cursor.fetchone()
 
         # Expiring members
+        expiring_params = [date.today(), date.today() + timedelta(days=30)]
+        if branch_id:
+            expiring_params.append(branch_id)
         cursor.execute(
-            """
+            f"""
             SELECT
                 mm.id, mm.membership_code, mm.end_date,
                 u.name, u.email, u.phone,
@@ -327,11 +426,13 @@ def get_members_report(
             FROM member_memberships mm
             JOIN users u ON mm.user_id = u.id
             JOIN membership_packages mp ON mm.package_id = mp.id
+            {branch_join}
             WHERE mm.status = 'active' AND mm.end_date BETWEEN %s AND %s
+            {branch_filter}
             ORDER BY mm.end_date ASC
             LIMIT 50
             """,
-            (date.today(), date.today() + timedelta(days=30)),
+            expiring_params,
         )
         expiring = cursor.fetchall()
 
@@ -361,6 +462,7 @@ def get_attendance_report(
     date_from: date = Query(...),
     date_to: date = Query(...),
     auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
 ):
     """Get attendance report"""
     check_permission(auth, "report.view")
@@ -369,20 +471,25 @@ def get_attendance_report(
     cursor = conn.cursor(dictionary=True)
 
     try:
+        # Branch filter for member_checkins
+        checkin_branch_filter = "AND mc.branch_id = %s" if branch_id else ""
+        checkin_params = [date_from, date_to, branch_id] if branch_id else [date_from, date_to]
+
         # Check-ins by day
         cursor.execute(
-            """
+            f"""
             SELECT
-                DATE(checkin_time) as date,
+                DATE(mc.checkin_time) as date,
                 COUNT(*) as total_checkins,
-                COUNT(DISTINCT user_id) as unique_members,
-                AVG(TIMESTAMPDIFF(MINUTE, checkin_time, COALESCE(checkout_time, checkin_time))) as avg_duration_minutes
-            FROM member_checkins
-            WHERE DATE(checkin_time) BETWEEN %s AND %s
-            GROUP BY DATE(checkin_time)
+                COUNT(DISTINCT mc.user_id) as unique_members,
+                AVG(TIMESTAMPDIFF(MINUTE, mc.checkin_time, COALESCE(mc.checkout_time, mc.checkin_time))) as avg_duration_minutes
+            FROM member_checkins mc
+            WHERE DATE(mc.checkin_time) BETWEEN %s AND %s
+            {checkin_branch_filter}
+            GROUP BY DATE(mc.checkin_time)
             ORDER BY date ASC
             """,
-            (date_from, date_to),
+            checkin_params,
         )
         checkins_by_day = cursor.fetchall()
 
@@ -391,37 +498,41 @@ def get_attendance_report(
 
         # Check-ins by hour
         cursor.execute(
-            """
+            f"""
             SELECT
-                HOUR(checkin_time) as hour,
+                HOUR(mc.checkin_time) as hour,
                 COUNT(*) as checkin_count
-            FROM member_checkins
-            WHERE DATE(checkin_time) BETWEEN %s AND %s
-            GROUP BY HOUR(checkin_time)
+            FROM member_checkins mc
+            WHERE DATE(mc.checkin_time) BETWEEN %s AND %s
+            {checkin_branch_filter}
+            GROUP BY HOUR(mc.checkin_time)
             ORDER BY hour ASC
             """,
-            (date_from, date_to),
+            checkin_params,
         )
         checkins_by_hour = cursor.fetchall()
 
         # Check-ins by day of week
         cursor.execute(
-            """
+            f"""
             SELECT
-                DAYOFWEEK(checkin_time) as day_of_week,
+                DAYOFWEEK(mc.checkin_time) as day_of_week,
                 COUNT(*) as checkin_count
-            FROM member_checkins
-            WHERE DATE(checkin_time) BETWEEN %s AND %s
-            GROUP BY DAYOFWEEK(checkin_time)
+            FROM member_checkins mc
+            WHERE DATE(mc.checkin_time) BETWEEN %s AND %s
+            {checkin_branch_filter}
+            GROUP BY DAYOFWEEK(mc.checkin_time)
             ORDER BY day_of_week ASC
             """,
-            (date_from, date_to),
+            checkin_params,
         )
         checkins_by_dow = cursor.fetchall()
 
         # Class attendance
+        class_branch_filter = "AND cs.branch_id = %s" if branch_id else ""
+        class_params = [date_from, date_to, branch_id] if branch_id else [date_from, date_to]
         cursor.execute(
-            """
+            f"""
             SELECT
                 ct.name as class_name,
                 COUNT(cb.id) as total_bookings,
@@ -432,16 +543,17 @@ def get_attendance_report(
             JOIN class_schedules cs ON cb.schedule_id = cs.id
             JOIN class_types ct ON cs.class_type_id = ct.id
             WHERE cb.class_date BETWEEN %s AND %s
+            {class_branch_filter}
             GROUP BY ct.id
             ORDER BY total_bookings DESC
             """,
-            (date_from, date_to),
+            class_params,
         )
         class_attendance = cursor.fetchall()
 
         # Top visitors
         cursor.execute(
-            """
+            f"""
             SELECT
                 u.id, u.name, u.email,
                 COUNT(mc.id) as visit_count,
@@ -449,11 +561,12 @@ def get_attendance_report(
             FROM member_checkins mc
             JOIN users u ON mc.user_id = u.id
             WHERE DATE(mc.checkin_time) BETWEEN %s AND %s
+            {checkin_branch_filter}
             GROUP BY u.id
             ORDER BY visit_count DESC
             LIMIT 20
             """,
-            (date_from, date_to),
+            checkin_params,
         )
         top_visitors = cursor.fetchall()
 
@@ -462,15 +575,16 @@ def get_attendance_report(
 
         # Summary
         cursor.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) as total_checkins,
-                COUNT(DISTINCT user_id) as unique_members,
-                AVG(TIMESTAMPDIFF(MINUTE, checkin_time, COALESCE(checkout_time, checkin_time))) as avg_duration
-            FROM member_checkins
-            WHERE DATE(checkin_time) BETWEEN %s AND %s
+                COUNT(DISTINCT mc.user_id) as unique_members,
+                AVG(TIMESTAMPDIFF(MINUTE, mc.checkin_time, COALESCE(mc.checkout_time, mc.checkin_time))) as avg_duration
+            FROM member_checkins mc
+            WHERE DATE(mc.checkin_time) BETWEEN %s AND %s
+            {checkin_branch_filter}
             """,
-            (date_from, date_to),
+            checkin_params,
         )
         summary = cursor.fetchone()
         summary["avg_duration"] = float(summary["avg_duration"]) if summary.get("avg_duration") else 0
