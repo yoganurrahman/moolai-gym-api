@@ -130,9 +130,12 @@ def get_membership_history(
         offset = (page - 1) * limit
         cursor.execute(
             """
-            SELECT mm.*, mp.name as package_name, mp.package_type, mp.price
+            SELECT mm.*, mp.name as package_name, mp.package_type, mp.price,
+                   b.name as branch_name, b.code as branch_code
             FROM member_memberships mm
             JOIN membership_packages mp ON mm.package_id = mp.id
+            LEFT JOIN transactions t ON mm.transaction_id = t.id
+            LEFT JOIN branches b ON t.branch_id = b.id
             WHERE mm.user_id = %s
             ORDER BY mm.created_at DESC
             LIMIT %s OFFSET %s

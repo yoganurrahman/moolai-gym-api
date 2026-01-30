@@ -189,6 +189,46 @@ def get_class_schedules(
         conn.close()
 
 
+@router.get("/my-passes")
+def get_my_class_passes(auth: dict = Depends(verify_bearer_token)):
+    """Get my active class passes with remaining quota"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT mcp.*, cp.name as package_name
+            FROM member_class_passes mcp
+            JOIN class_packages cp ON mcp.class_package_id = cp.id
+            WHERE mcp.user_id = %s AND mcp.status = 'active'
+            ORDER BY mcp.expire_date ASC
+            """,
+            (auth["user_id"],),
+        )
+        passes = cursor.fetchall()
+
+        total_remaining = sum(p["remaining_classes"] for p in passes)
+
+        return {
+            "success": True,
+            "data": {
+                "passes": passes,
+                "total_remaining": total_remaining,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting class passes: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_CLASS_PASSES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/book")
 def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_token)):
     """Book a class"""
@@ -322,7 +362,7 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
                 access_type = "class_pass"
                 booking_class_pass_id = class_pass["id"]
                 cursor.execute(
-                    "UPDATE member_class_passes SET used_classes = used_classes + 1, remaining_classes = remaining_classes - 1 WHERE id = %s",
+                    "UPDATE member_class_passes SET used_classes = used_classes + 1 WHERE id = %s",
                     (class_pass["id"],),
                 )
             else:
@@ -450,7 +490,7 @@ def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
             cursor.execute(
                 """
                 UPDATE member_class_passes
-                SET used_classes = used_classes - 1, remaining_classes = remaining_classes + 1
+                SET used_classes = used_classes - 1
                 WHERE id = %s
                 """,
                 (booking["class_pass_id"],),

@@ -914,7 +914,7 @@ def cancel_booking_admin(booking_id: int, auth: dict = Depends(verify_bearer_tok
             cursor.execute(
                 """
                 UPDATE member_class_passes
-                SET used_classes = used_classes - 1, remaining_classes = remaining_classes + 1
+                SET used_classes = used_classes - 1
                 WHERE id = %s
                 """,
                 (booking["class_pass_id"],),
