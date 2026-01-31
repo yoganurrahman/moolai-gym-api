@@ -21,6 +21,8 @@ router = APIRouter(prefix="/reports", tags=["CMS - Reports"])
 def get_dashboard(
     auth: dict = Depends(verify_bearer_token),
     branch_id: Optional[int] = Depends(get_branch_id),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
 ):
     """Get dashboard summary"""
     check_permission(auth, "report.view")
@@ -30,25 +32,37 @@ def get_dashboard(
 
     try:
         today = date.today()
-        first_day_of_month = today.replace(day=1)
+        # Use provided date range or default to first day of month
+        if date_from and date_to:
+            revenue_start = datetime.strptime(date_from, "%Y-%m-%d").date()
+            revenue_end = datetime.strptime(date_to, "%Y-%m-%d").date()
+        else:
+            revenue_start = today.replace(day=1)
+            revenue_end = today
 
         # Members stats
+        member_branch_filter = "AND t.branch_id = %s" if branch_id else ""
+        member_params = [today, branch_id] if branch_id else [today]
         cursor.execute(
-            """
+            f"""
             SELECT
                 COUNT(CASE WHEN mm.status = 'active' THEN 1 END) as active_members,
                 COUNT(CASE WHEN mm.status = 'expired' THEN 1 END) as expired_members,
                 COUNT(CASE WHEN mm.status = 'frozen' THEN 1 END) as frozen_members,
                 COUNT(CASE WHEN DATE(mm.created_at) = %s THEN 1 END) as new_today
             FROM member_memberships mm
+            LEFT JOIN transactions t ON mm.transaction_id = t.id
+            WHERE 1=1 {member_branch_filter}
             """,
-            (today,),
+            member_params,
         )
         member_stats = cursor.fetchone()
 
-        # Revenue stats (this month)
+        # Revenue stats
         branch_filter = "AND branch_id = %s" if branch_id else ""
-        revenue_params = [first_day_of_month, branch_id] if branch_id else [first_day_of_month]
+        revenue_params = [revenue_start, revenue_end]
+        if branch_id:
+            revenue_params.append(branch_id)
         cursor.execute(
             f"""
             SELECT
@@ -56,7 +70,7 @@ def get_dashboard(
                 COUNT(*) as total_transactions,
                 COALESCE(AVG(grand_total), 0) as avg_transaction
             FROM transactions
-            WHERE payment_status = 'paid' AND DATE(created_at) >= %s
+            WHERE payment_status = 'paid' AND DATE(created_at) BETWEEN %s AND %s
             {branch_filter}
             """,
             revenue_params,
@@ -65,31 +79,54 @@ def get_dashboard(
         revenue_stats["total_revenue"] = float(revenue_stats["total_revenue"])
         revenue_stats["avg_transaction"] = float(revenue_stats["avg_transaction"])
 
-        # Today's check-ins
+        # Check-ins (date range for total, today for currently_in)
         checkin_branch_filter = "AND branch_id = %s" if branch_id else ""
-        checkin_params = [today, branch_id] if branch_id else [today]
+        checkin_params = [revenue_start, revenue_end]
+        if branch_id:
+            checkin_params.append(branch_id)
         cursor.execute(
             f"""
             SELECT
                 COUNT(*) as total_checkins,
-                COUNT(DISTINCT user_id) as unique_members,
-                COUNT(CASE WHEN checkout_time IS NULL THEN 1 END) as currently_in
+                COUNT(DISTINCT user_id) as unique_members
             FROM member_checkins
-            WHERE DATE(checkin_time) = %s
+            WHERE DATE(checkin_time) BETWEEN %s AND %s
             {checkin_branch_filter}
             """,
             checkin_params,
         )
         checkin_stats = cursor.fetchone()
 
-        # Upcoming expirations (next 7 days)
+        # Currently in gym (always today)
+        currently_in_params = [today]
+        if branch_id:
+            currently_in_params.append(branch_id)
         cursor.execute(
-            """
-            SELECT COUNT(*) as expiring_soon
-            FROM member_memberships
-            WHERE status = 'active' AND end_date BETWEEN %s AND %s
+            f"""
+            SELECT COUNT(*) as currently_in
+            FROM member_checkins
+            WHERE DATE(checkin_time) = %s AND checkout_time IS NULL
+            {checkin_branch_filter}
             """,
-            (today, today + timedelta(days=7)),
+            currently_in_params,
+        )
+        currently_in = cursor.fetchone()
+        checkin_stats["currently_in"] = currently_in["currently_in"]
+
+        # Upcoming expirations (next 30 days)
+        expiring_branch_filter = "AND t.branch_id = %s" if branch_id else ""
+        expiring_params = [today, today + timedelta(days=30)]
+        if branch_id:
+            expiring_params.append(branch_id)
+        cursor.execute(
+            f"""
+            SELECT COUNT(*) as expiring_soon
+            FROM member_memberships mm
+            LEFT JOIN transactions t ON mm.transaction_id = t.id
+            WHERE mm.status = 'active' AND mm.end_date BETWEEN %s AND %s
+            {expiring_branch_filter}
+            """,
+            expiring_params,
         )
         expiring = cursor.fetchone()
 
@@ -177,7 +214,7 @@ def get_revenue_report(
             group_sql = "YEARWEEK(t.created_at)"
         else:  # month
             date_format = "%Y-%m"
-            group_sql = "DATE_FORMAT(t.created_at, '%Y-%m')"
+            group_sql = "DATE_FORMAT(t.created_at, '%%Y-%%m')"
 
         # Branch filter
         branch_filter = "AND t.branch_id = %s" if branch_id else ""
