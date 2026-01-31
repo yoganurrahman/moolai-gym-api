@@ -190,6 +190,9 @@ def get_products(
             branch_join = " LEFT JOIN branch_product_stock bps ON p.id = bps.product_id AND bps.branch_id = %s"
             branch_select = ", bps.stock AS branch_stock, bps.min_stock AS branch_min_stock"
             count_join = branch_join
+        else:
+            # When no branch selected, get total stock across all branches
+            branch_select = ", (SELECT COALESCE(SUM(bps2.stock), 0) FROM branch_product_stock bps2 WHERE bps2.product_id = p.id) AS total_branch_stock"
 
         # Count total
         count_params = ([branch_id] + params) if branch_id else list(params)
@@ -238,6 +241,10 @@ def get_products(
                 }
                 # Remove flat branch columns from top-level
                 p.pop("branch_min_stock", None)
+            else:
+                # Replace global stock with total from all branches
+                total_b_stock = p.pop("total_branch_stock", 0)
+                p["total_stock"] = int(total_b_stock) if total_b_stock else 0
 
         return {
             "success": True,
@@ -662,9 +669,10 @@ def get_stock_logs(
         offset = (page - 1) * limit
         cursor.execute(
             """
-            SELECT psl.*, u.name as created_by_name
+            SELECT psl.*, u.name as created_by_name, b.name as branch_name
             FROM product_stock_logs psl
             LEFT JOIN users u ON psl.created_by = u.id
+            LEFT JOIN branches b ON psl.branch_id = b.id
             WHERE psl.product_id = %s
             ORDER BY psl.created_at DESC
             LIMIT %s OFFSET %s

@@ -320,11 +320,12 @@ def checkout(
                 cursor.execute(
                     """
                     INSERT INTO product_stock_logs
-                    (product_id, type, quantity, stock_before, stock_after, reference_type, reference_id, created_by, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (product_id, branch_id, type, quantity, stock_before, stock_after, reference_type, reference_id, created_by, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         item["item_id"],
+                        branch_id,
                         "out",
                         item["quantity"],
                         item["details"]["stock"],
@@ -675,7 +676,7 @@ def refund_transaction(
             (f"\n[REFUND] {request.reason}", datetime.now(), transaction_id),
         )
 
-        # Restore stock for products
+        # Restore stock for products to branch_product_stock
         cursor.execute(
             "SELECT * FROM transaction_items WHERE transaction_id = %s AND item_type = 'product'",
             (transaction_id,),
@@ -683,9 +684,46 @@ def refund_transaction(
         product_items = cursor.fetchall()
 
         for item in product_items:
+            # Get current branch stock before restoring
             cursor.execute(
-                "UPDATE products SET stock = stock + %s WHERE id = %s",
-                (item["quantity"], item["item_id"]),
+                "SELECT stock FROM branch_product_stock WHERE branch_id = %s AND product_id = %s",
+                (transaction["branch_id"], item["item_id"]),
+            )
+            branch_row = cursor.fetchone()
+            current_stock = branch_row["stock"] if branch_row else 0
+            new_stock = current_stock + item["quantity"]
+
+            if branch_row:
+                cursor.execute(
+                    "UPDATE branch_product_stock SET stock = %s WHERE branch_id = %s AND product_id = %s",
+                    (new_stock, transaction["branch_id"], item["item_id"]),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO branch_product_stock (branch_id, product_id, stock, min_stock) VALUES (%s, %s, %s, 0)",
+                    (transaction["branch_id"], item["item_id"], new_stock),
+                )
+
+            # Log stock change
+            cursor.execute(
+                """
+                INSERT INTO product_stock_logs
+                (product_id, branch_id, type, quantity, stock_before, stock_after, reference_type, reference_id, notes, created_by, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    item["item_id"],
+                    transaction["branch_id"],
+                    "in",
+                    item["quantity"],
+                    current_stock,
+                    new_stock,
+                    "transaction",
+                    transaction_id,
+                    f"Refund: {request.reason}",
+                    auth["user_id"],
+                    datetime.now(),
+                ),
             )
 
         conn.commit()

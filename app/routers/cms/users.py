@@ -45,6 +45,7 @@ class UserResetPasswordRequest(BaseModel):
 def list_users(
     search: Optional[str] = Query(None),
     role_id: Optional[int] = Query(None),
+    role_ids: Optional[str] = Query(None, description="Comma-separated role IDs, e.g. 1,2,5"),
     is_active: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
@@ -86,6 +87,15 @@ def list_users(
             count_query += role_filter
             params.append(role_id)
             count_params.append(role_id)
+        elif role_ids:
+            ids = [int(x.strip()) for x in role_ids.split(",") if x.strip().isdigit()]
+            if ids:
+                placeholders = ",".join(["%s"] * len(ids))
+                role_filter = f" AND u.role_id IN ({placeholders})"
+                query += role_filter
+                count_query += role_filter
+                params.extend(ids)
+                count_params.extend(ids)
 
         if is_active is not None:
             active_filter = " AND u.is_active = %s"
