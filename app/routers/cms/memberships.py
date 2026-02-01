@@ -98,7 +98,11 @@ def get_all_memberships(
         cursor.execute(
             f"""
             SELECT mm.*, mp.name as package_name, mp.package_type, mp.price,
-                   u.name as member_name, u.email as member_email, u.phone as member_phone
+                   mp.include_classes, mp.class_quota,
+                   u.name as member_name, u.email as member_email, u.phone as member_phone,
+                   (SELECT COUNT(*) FROM class_bookings cb
+                    WHERE cb.membership_id = mm.id
+                    AND cb.status IN ('booked', 'attended')) as classes_used
             FROM member_memberships mm
             JOIN membership_packages mp ON mm.package_id = mp.id
             JOIN users u ON mm.user_id = u.id

@@ -385,27 +385,63 @@ def get_my_clients(
 
         where_sql = " WHERE " + " AND ".join(where_clauses)
 
+        # Get aggregated per-member summary
         cursor.execute(
             f"""
-            SELECT mps.id as session_id, mps.total_sessions, mps.used_sessions,
-                   mps.remaining_sessions, mps.start_date, mps.expire_date, mps.status,
-                   u.id as user_id, u.name as member_name, u.email as member_email,
+            SELECT u.id as user_id, u.name as member_name, u.email as member_email,
                    u.phone as member_phone,
-                   pp.name as package_name
+                   SUM(mps.total_sessions) as total_sessions,
+                   SUM(mps.used_sessions) as used_sessions,
+                   SUM(mps.remaining_sessions) as remaining_sessions,
+                   SUM(CASE WHEN mps.status = 'active' THEN 1 ELSE 0 END) as active_packages,
+                   COUNT(*) as package_count
             FROM member_pt_sessions mps
             JOIN users u ON mps.user_id = u.id
-            JOIN pt_packages pp ON mps.pt_package_id = pp.id
             {where_sql}
-            ORDER BY mps.status ASC, mps.expire_date ASC
+            GROUP BY u.id, u.name, u.email, u.phone
+            ORDER BY active_packages DESC, remaining_sessions DESC
             """,
             params,
         )
-        clients = cursor.fetchall()
+        members = cursor.fetchall()
+        member_ids = [m["user_id"] for m in members]
+
+        # Get individual sessions for these members
+        sessions_by_user = {}
+        if member_ids:
+            placeholders = ",".join(["%s"] * len(member_ids))
+            sess_where = list(where_clauses)
+            sess_params = list(params)
+            sess_where.append(f"mps.user_id IN ({placeholders})")
+            sess_params.extend(member_ids)
+            sess_where_sql = " WHERE " + " AND ".join(sess_where)
+
+            cursor.execute(
+                f"""
+                SELECT mps.id as session_id, mps.user_id, mps.total_sessions, mps.used_sessions,
+                       mps.remaining_sessions, mps.start_date, mps.expire_date, mps.status,
+                       pp.name as package_name
+                FROM member_pt_sessions mps
+                JOIN pt_packages pp ON mps.pt_package_id = pp.id
+                {sess_where_sql}
+                ORDER BY mps.status ASC, mps.expire_date ASC
+                """,
+                sess_params,
+            )
+            for s in cursor.fetchall():
+                sessions_by_user.setdefault(s["user_id"], []).append(s)
+
+        for m in members:
+            m["total_sessions"] = int(m["total_sessions"] or 0)
+            m["used_sessions"] = int(m["used_sessions"] or 0)
+            m["remaining_sessions"] = int(m["remaining_sessions"] or 0)
+            m["active_packages"] = int(m["active_packages"] or 0)
+            m["sessions"] = sessions_by_user.get(m["user_id"], [])
 
         return {
             "success": True,
-            "data": clients,
-            "total": len(clients),
+            "data": members,
+            "total": len(members),
         }
 
     except HTTPException:

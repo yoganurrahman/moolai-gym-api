@@ -1181,6 +1181,138 @@ def get_class_packages(
         conn.close()
 
 
+# ============== Member Class Passes (CMS) ==============
+
+@router.get("/member-passes")
+def get_member_class_passes(
+    user_id: int = None,
+    status_filter: str = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(get_branch_id),
+):
+    """Get member class passes grouped by member"""
+    check_permission(auth, "class.view")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        where_clauses = ["1=1"]
+        params = []
+
+        if user_id:
+            where_clauses.append("mcp.user_id = %s")
+            params.append(user_id)
+
+        if status_filter:
+            where_clauses.append("mcp.status = %s")
+            params.append(status_filter)
+
+        if branch_id:
+            where_clauses.append("mcp.transaction_id IN (SELECT id FROM transactions WHERE branch_id = %s)")
+            params.append(branch_id)
+
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        # Count distinct members
+        cursor.execute(
+            f"SELECT COUNT(DISTINCT mcp.user_id) as total FROM member_class_passes mcp {where_sql}",
+            params,
+        )
+        total = cursor.fetchone()["total"]
+
+        # Get paginated member IDs
+        offset_val = (page - 1) * limit
+        cursor.execute(
+            f"""
+            SELECT mcp.user_id, u.name as member_name, u.email as member_email, u.phone as member_phone,
+                   COUNT(*) as pass_count,
+                   SUM(mcp.total_classes) as total_classes,
+                   SUM(mcp.used_classes) as total_used,
+                   SUM(mcp.remaining_classes) as total_remaining,
+                   SUM(CASE WHEN mcp.status = 'active' THEN 1 ELSE 0 END) as active_count
+            FROM member_class_passes mcp
+            JOIN users u ON mcp.user_id = u.id
+            {where_sql}
+            GROUP BY mcp.user_id, u.name, u.email, u.phone
+            ORDER BY active_count DESC, total_remaining DESC
+            LIMIT %s OFFSET %s
+            """,
+            params + [limit, offset_val],
+        )
+        members = cursor.fetchall()
+        member_ids = [m["user_id"] for m in members]
+
+        # Fetch all passes for these members
+        if member_ids:
+            placeholders = ",".join(["%s"] * len(member_ids))
+            pass_where = where_clauses.copy()
+            pass_params = params.copy()
+            pass_where.append(f"mcp.user_id IN ({placeholders})")
+            pass_params.extend(member_ids)
+            pass_where_sql = "WHERE " + " AND ".join(pass_where)
+
+            cursor.execute(
+                f"""
+                SELECT mcp.*, cp.name as package_name, cp.class_count as package_class_count,
+                       cp.valid_days, cp.price
+                FROM member_class_passes mcp
+                JOIN class_packages cp ON mcp.class_package_id = cp.id
+                {pass_where_sql}
+                ORDER BY mcp.status = 'active' DESC, mcp.created_at DESC
+                """,
+                pass_params,
+            )
+            all_passes = cursor.fetchall()
+
+            # Group passes by user_id
+            passes_by_user = {}
+            for p in all_passes:
+                p["price"] = float(p["price"]) if p.get("price") else 0
+                if p.get("expire_date") and p["status"] == "active":
+                    remaining_days = (p["expire_date"] - date.today()).days
+                    p["remaining_days"] = max(0, remaining_days)
+                else:
+                    p["remaining_days"] = None
+                passes_by_user.setdefault(p["user_id"], []).append(p)
+        else:
+            passes_by_user = {}
+
+        # Build response
+        data = []
+        for m in members:
+            m["total_classes"] = int(m["total_classes"] or 0)
+            m["total_used"] = int(m["total_used"] or 0)
+            m["total_remaining"] = int(m["total_remaining"] or 0)
+            m["active_count"] = int(m["active_count"] or 0)
+            m["passes"] = passes_by_user.get(m["user_id"], [])
+            data.append(m)
+
+        return {
+            "success": True,
+            "data": data,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "total_pages": (total + limit - 1) // limit,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching member class passes: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "FETCH_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # ============== Book Class for Member (CMS) ==============
 
 @router.post("/bookings", status_code=status.HTTP_201_CREATED)

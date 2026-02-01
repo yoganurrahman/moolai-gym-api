@@ -87,9 +87,12 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             """
-            SELECT mps.*, pp.name as package_name
+            SELECT mps.*, pp.name as package_name, t.user_id as trainer_user_id,
+                   u.name as trainer_name
             FROM member_pt_sessions mps
             JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            LEFT JOIN trainers t ON mps.trainer_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
             WHERE mps.user_id = %s AND mps.status = 'active'
             ORDER BY mps.expire_date ASC
             """,
@@ -99,11 +102,26 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
 
         total_remaining = sum(s["remaining_sessions"] for s in sessions)
 
+        # Aggregate per trainer
+        per_trainer = {}
+        for s in sessions:
+            tid = s.get("trainer_id")
+            if tid is None:
+                continue
+            if tid not in per_trainer:
+                per_trainer[tid] = {
+                    "trainer_id": tid,
+                    "trainer_name": s.get("trainer_name") or "Trainer",
+                    "remaining_sessions": 0,
+                }
+            per_trainer[tid]["remaining_sessions"] += s["remaining_sessions"]
+
         return {
             "success": True,
             "data": {
                 "sessions": sessions,
                 "total_remaining": total_remaining,
+                "per_trainer": list(per_trainer.values()),
             },
         }
 
