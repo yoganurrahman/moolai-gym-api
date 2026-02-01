@@ -84,7 +84,7 @@ def get_all_checkins(
             JOIN users u ON mc.user_id = u.id
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
-            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN class_packages cpt ON mcp.class_package_id = cpt.id
             LEFT JOIN branches b ON mc.branch_id = b.id
             {where_sql}
             """,
@@ -107,7 +107,7 @@ def get_all_checkins(
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN users staff ON mc.checked_in_by = staff.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
-            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN class_packages cpt ON mcp.class_package_id = cpt.id
             LEFT JOIN branches b ON mc.branch_id = b.id
             {where_sql}
             ORDER BY mc.checkin_time DESC
@@ -199,7 +199,7 @@ def get_today_checkins(
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
-            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN class_packages cpt ON mcp.class_package_id = cpt.id
             LEFT JOIN branches b ON mc.branch_id = b.id
             WHERE mc.checkin_time BETWEEN %s AND %s{branch_filter}
             ORDER BY mc.checkin_time DESC
@@ -279,7 +279,7 @@ def get_currently_in_members(
             LEFT JOIN member_memberships mm ON mc.membership_id = mm.id
             LEFT JOIN membership_packages mp ON mm.package_id = mp.id
             LEFT JOIN member_class_passes mcp ON mc.class_pass_id = mcp.id
-            LEFT JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+            LEFT JOIN class_packages cpt ON mcp.class_package_id = cpt.id
             LEFT JOIN branches b ON mc.branch_id = b.id
             WHERE mc.checkout_time IS NULL{branch_filter}
             ORDER BY mc.checkin_time ASC
@@ -379,7 +379,7 @@ def manual_checkin(
                 """
                 SELECT mcp.*, cpt.name as pass_name
                 FROM member_class_passes mcp
-                JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+                JOIN class_packages cpt ON mcp.class_package_id = cpt.id
                 WHERE mcp.user_id = %s AND mcp.status = 'active' AND mcp.remaining_classes > 0
                   AND (mcp.expire_date IS NULL OR mcp.expire_date >= %s)
                 ORDER BY mcp.expire_date ASC

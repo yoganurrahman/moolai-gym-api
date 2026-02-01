@@ -4,7 +4,7 @@ Hybrid transaction system for all item types
 """
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
@@ -31,6 +31,7 @@ class TransactionItem(BaseModel):
 class CheckoutRequest(BaseModel):
     items: List[TransactionItem]
     payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet|other)$")
+    user_id: Optional[int] = None  # Member ID (CMS staff checkout for registered member)
     customer_name: Optional[str] = None  # For walk-in customer
     customer_phone: Optional[str] = None
     customer_email: Optional[str] = None
@@ -55,17 +56,17 @@ def get_item_details(cursor, item_type: str, item_id: int, branch_id: int = None
     """Get item details based on type"""
     if item_type == "membership":
         cursor.execute(
-            "SELECT id, name, price, duration_days, visit_quota FROM membership_packages WHERE id = %s AND is_active = 1",
+            "SELECT id, name, price, package_type, duration_days, visit_quota, class_quota FROM membership_packages WHERE id = %s AND is_active = 1",
             (item_id,),
         )
     elif item_type == "class_pass":
         cursor.execute(
-            "SELECT id, name, price, class_count FROM class_packages WHERE id = %s AND is_active = 1",
+            "SELECT id, name, price, class_count, valid_days FROM class_packages WHERE id = %s AND is_active = 1",
             (item_id,),
         )
     elif item_type == "pt_package":
         cursor.execute(
-            "SELECT id, name, price, session_count FROM pt_packages WHERE id = %s AND is_active = 1",
+            "SELECT id, name, price, session_count, valid_days, trainer_id FROM pt_packages WHERE id = %s AND is_active = 1",
             (item_id,),
         )
     elif item_type in ("product", "rental"):
@@ -106,7 +107,19 @@ def checkout(
     cursor = conn.cursor(dictionary=True)
 
     try:
-        user_id = auth.get("user_id")
+        # Determine buyer and staff
+        # 1. request.user_id → CMS staff checkout for registered member
+        # 2. request.customer_name → walk-in customer
+        # 3. neither → self-purchase (auth user is the buyer)
+        if request.user_id:
+            buyer_user_id = request.user_id
+            staff_id = auth.get("user_id")
+        elif request.customer_name:
+            buyer_user_id = None
+            staff_id = auth.get("user_id")
+        else:
+            buyer_user_id = auth.get("user_id")
+            staff_id = None
 
         # Get branch code
         cursor.execute("SELECT code FROM branches WHERE id = %s", (branch_id,))
@@ -244,8 +257,8 @@ def checkout(
             (
                 transaction_code,
                 branch_id,
-                user_id if user_id and not request.customer_name else None,  # Member purchase
-                auth["user_id"] if request.customer_name else None,  # Staff for walk-in
+                buyer_user_id,
+                staff_id,
                 request.customer_name,
                 request.customer_phone,
                 request.customer_email,
@@ -299,7 +312,7 @@ def checkout(
             )
 
             # Process based on item type
-            target_user_id = user_id if user_id and not request.customer_name else None
+            target_user_id = buyer_user_id
 
             if item["item_type"] == "product" and not item["details"].get("is_rental"):
                 # Deduct stock from branch_product_stock
@@ -333,6 +346,93 @@ def checkout(
                         "transaction",
                         transaction_id,
                         auth["user_id"],
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "membership" and target_user_id:
+                # Activate membership for the member
+                details = item["details"]
+                start_date_m = date.today()
+                end_date_m = None
+                visit_remaining = None
+
+                if details.get("visit_quota"):
+                    visit_remaining = details["visit_quota"]
+                elif details.get("duration_days"):
+                    end_date_m = start_date_m + timedelta(days=details["duration_days"])
+
+                membership_code = f"MBR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                cursor.execute(
+                    """
+                    INSERT INTO member_memberships
+                    (user_id, package_id, transaction_id, membership_code, start_date, end_date,
+                     visit_remaining, class_remaining, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        membership_code,
+                        start_date_m,
+                        end_date_m,
+                        visit_remaining,
+                        details.get("class_quota"),
+                        "active",
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "class_pass" and target_user_id:
+                # Create class pass for the member
+                details = item["details"]
+                start_date_c = date.today()
+                expire_date_c = start_date_c + timedelta(days=details.get("valid_days", 30))
+
+                cursor.execute(
+                    """
+                    INSERT INTO member_class_passes
+                    (user_id, class_package_id, transaction_id, total_classes, used_classes,
+                     start_date, expire_date, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        details.get("class_count", 1),
+                        0,
+                        start_date_c,
+                        expire_date_c,
+                        "active",
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "pt_package" and target_user_id:
+                # Create PT sessions for the member
+                details = item["details"]
+                start_date_p = date.today()
+                expire_date_p = start_date_p + timedelta(days=details.get("valid_days", 90))
+
+                cursor.execute(
+                    """
+                    INSERT INTO member_pt_sessions
+                    (user_id, pt_package_id, transaction_id, trainer_id, total_sessions, used_sessions,
+                     start_date, expire_date, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        details.get("trainer_id"),
+                        details.get("session_count", 1),
+                        0,
+                        start_date_p,
+                        expire_date_p,
+                        "active",
                         datetime.now(),
                     ),
                 )
@@ -725,6 +825,36 @@ def refund_transaction(
                     datetime.now(),
                 ),
             )
+
+        # Cancel memberships created by this transaction
+        cursor.execute(
+            """
+            UPDATE member_memberships
+            SET status = 'cancelled', cancelled_at = %s, cancellation_reason = %s, updated_at = %s
+            WHERE transaction_id = %s AND status = 'active'
+            """,
+            (datetime.now(), f"Refund: {request.reason}", datetime.now(), transaction_id),
+        )
+
+        # Cancel class passes created by this transaction
+        cursor.execute(
+            """
+            UPDATE member_class_passes
+            SET status = 'expired', updated_at = %s
+            WHERE transaction_id = %s AND status = 'active'
+            """,
+            (datetime.now(), transaction_id),
+        )
+
+        # Cancel PT sessions created by this transaction
+        cursor.execute(
+            """
+            UPDATE member_pt_sessions
+            SET status = 'expired', updated_at = %s
+            WHERE transaction_id = %s AND status = 'active'
+            """,
+            (datetime.now(), transaction_id),
+        )
 
         conn.commit()
 

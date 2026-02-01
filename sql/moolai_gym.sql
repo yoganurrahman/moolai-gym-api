@@ -1190,16 +1190,16 @@ CREATE TABLE `products` (
 -- ----------------------------
 -- Records of products
 -- ----------------------------
-INSERT INTO `products` (`category_id`, `sku`, `name`, `description`, `price`, `cost_price`, `stock`) VALUES
-(1, 'SUP-WHEY-001', 'Whey Protein 1kg', 'Whey protein isolate', 350000.00, 280000.00, 20),
-(1, 'SUP-BCAA-001', 'BCAA 300g', 'Branched-chain amino acids', 250000.00, 180000.00, 15),
-(2, 'BEV-SHAKE-001', 'Protein Shake', 'Ready to drink protein shake', 35000.00, 20000.00, 50),
-(2, 'BEV-WATER-001', 'Mineral Water 600ml', 'Air mineral', 8000.00, 4000.00, 100),
-(3, 'SNK-BAR-001', 'Energy Bar', 'High protein energy bar', 25000.00, 15000.00, 40),
-(4, 'APP-SHIRT-001', 'Gym T-Shirt', 'Kaos olahraga', 150000.00, 80000.00, 30),
-(5, 'ACC-GLOVE-001', 'Gym Gloves', 'Sarung tangan gym', 120000.00, 60000.00, 25),
-(6, 'RNT-TOWEL-001', 'Towel Rental', 'Sewa handuk', 10000.00, 2000.00, 999),
-(6, 'RNT-LOCKER-001', 'Locker Rental', 'Sewa locker harian', 15000.00, 0.00, 999);
+INSERT INTO `products` (`category_id`, `sku`, `name`, `description`, `price`, `cost_price`, `stock`, `is_rental`, `rental_duration`) VALUES
+(1, 'SUP-WHEY-001', 'Whey Protein 1kg', 'Whey protein isolate', 350000.00, 280000.00, 20, 0, NULL),
+(1, 'SUP-BCAA-001', 'BCAA 300g', 'Branched-chain amino acids', 250000.00, 180000.00, 15, 0, NULL),
+(2, 'BEV-SHAKE-001', 'Protein Shake', 'Ready to drink protein shake', 35000.00, 20000.00, 50, 0, NULL),
+(2, 'BEV-WATER-001', 'Mineral Water 600ml', 'Air mineral', 8000.00, 4000.00, 100, 0, NULL),
+(3, 'SNK-BAR-001', 'Energy Bar', 'High protein energy bar', 25000.00, 15000.00, 40, 0, NULL),
+(4, 'APP-SHIRT-001', 'Gym T-Shirt', 'Kaos olahraga', 150000.00, 80000.00, 30, 0, NULL),
+(5, 'ACC-GLOVE-001', 'Gym Gloves', 'Sarung tangan gym', 120000.00, 60000.00, 25, 0, NULL),
+(6, 'RNT-TOWEL-001', 'Towel Rental', 'Sewa handuk', 10000.00, 2000.00, 0, 1, 'per_visit'),
+(6, 'RNT-LOCKER-001', 'Locker Rental', 'Sewa locker harian', 15000.00, 0.00, 0, 1, 'per_day');
 
 -- ----------------------------
 -- Table: product_stock_logs
@@ -2151,6 +2151,30 @@ INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`,
 
 UPDATE `products` SET `stock` = 48 WHERE `id` = 3;
 UPDATE `products` SET `stock` = 98 WHERE `id` = 4;
+
+-- Walk-in customer 2: beli suplemen + air mineral
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `customer_name`, `customer_phone`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `change_amount`, `paid_at`, `created_at`) VALUES
+(12, 1, 'TRX-20260128-0012', NULL, 3, 'Walk-in Customer', NULL, 258000.00, 258000.00, 11, 28380.00, 286380.00, 'cash', 'paid', 300000.00, 13620.00, '2026-01-28 10:30:00', '2026-01-28 10:30:00');
+
+INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
+(12, 'product', 1, 'Whey Protein 1kg', 1, 250000.00, 250000.00, '2026-01-28 10:30:00'),
+(12, 'product', 4, 'Mineral Water 600ml', 1, 8000.00, 8000.00, '2026-01-28 10:30:00');
+
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 1, 'out', 1, 30, 29, 'transaction', 12, 'Penjualan walk-in', 3, '2026-01-28 10:30:00'),
+(1, 4, 'out', 1, 98, 97, 'transaction', 12, 'Penjualan walk-in', 3, '2026-01-28 10:30:00');
+
+-- Walk-in customer 3: beli snack dan minuman (QRIS)
+INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `customer_name`, `customer_phone`, `subtotal`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `paid_at`, `created_at`) VALUES
+(13, 1, 'TRX-20260129-0013', NULL, 3, 'Walk-in Customer', '081377778888', 33000.00, 33000.00, 11, 3630.00, 36630.00, 'qris', 'paid', 36630.00, '2026-01-29 14:00:00', '2026-01-29 14:00:00');
+
+INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item_name`, `quantity`, `unit_price`, `subtotal`, `created_at`) VALUES
+(13, 'product', 5, 'Energy Bar', 1, 25000.00, 25000.00, '2026-01-29 14:00:00'),
+(13, 'product', 4, 'Mineral Water 600ml', 1, 8000.00, 8000.00, '2026-01-29 14:00:00');
+
+INSERT INTO `product_stock_logs` (`branch_id`, `product_id`, `type`, `quantity`, `stock_before`, `stock_after`, `reference_type`, `reference_id`, `notes`, `created_by`, `created_at`) VALUES
+(1, 5, 'out', 1, 36, 35, 'transaction', 13, 'Penjualan walk-in', 3, '2026-01-29 14:00:00'),
+(1, 4, 'out', 1, 97, 96, 'transaction', 13, 'Penjualan walk-in', 3, '2026-01-29 14:00:00');
 
 -- ============================================================================
 -- SKENARIO 7: Stock Adjustment & Restock

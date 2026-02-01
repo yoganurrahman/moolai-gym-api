@@ -41,6 +41,13 @@ class BookPTRequest(BaseModel):
     start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
 
 
+class BookPTForMemberRequest(BaseModel):
+    user_id: int
+    member_pt_session_id: int
+    booking_date: date
+    start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+
+
 # ============== Helper Functions ==============
 
 def generate_transaction_code():
@@ -557,6 +564,61 @@ def get_my_pt_sessions(
         conn.close()
 
 
+@router.get("/member-sessions")
+def get_member_pt_sessions(
+    user_id: int = Query(...),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get PT sessions for a specific member (CMS)"""
+    check_permission(auth, "trainer.view")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        where_clauses = ["mps.user_id = %s"]
+        params = [user_id]
+
+        if status_filter:
+            where_clauses.append("mps.status = %s")
+            params.append(status_filter)
+
+        where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        cursor.execute(
+            f"""
+            SELECT mps.*, pp.name as package_name, pp.session_duration,
+                   u.name as trainer_name
+            FROM member_pt_sessions mps
+            JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            JOIN trainers t ON mps.trainer_id = t.id
+            JOIN users u ON t.user_id = u.id
+            {where_sql}
+            ORDER BY mps.created_at DESC
+            """,
+            params,
+        )
+        sessions = cursor.fetchall()
+
+        return {
+            "success": True,
+            "data": sessions,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting member PT sessions: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_MEMBER_PT_SESSIONS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # ============== CMS Endpoints ==============
 
 @router.post("/packages", status_code=status.HTTP_201_CREATED)
@@ -685,6 +747,322 @@ def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_toke
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "COMPLETE_PT_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ============== Book PT for Member (CMS) ==============
+
+@router.post("/book-for-member", status_code=status.HTTP_201_CREATED)
+def book_pt_for_member(
+    request: BookPTForMemberRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Book a PT session on behalf of a member (CMS staff)"""
+    check_permission(auth, "trainer.create")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Validate user exists
+        cursor.execute("SELECT id, name FROM users WHERE id = %s AND is_active = 1", (request.user_id,))
+        member = cursor.fetchone()
+        if not member:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "USER_NOT_FOUND", "message": "Member tidak ditemukan"},
+            )
+
+        # Get member PT session
+        cursor.execute(
+            """
+            SELECT mps.*, pp.session_duration, u.name as trainer_name
+            FROM member_pt_sessions mps
+            JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            JOIN trainers t ON mps.trainer_id = t.id
+            JOIN users u ON t.user_id = u.id
+            WHERE mps.id = %s AND mps.user_id = %s AND mps.status = 'active'
+            """,
+            (request.member_pt_session_id, request.user_id),
+        )
+        pt_session = cursor.fetchone()
+
+        if not pt_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PT_SESSION_NOT_FOUND", "message": "Paket PT member tidak ditemukan atau sudah expired"},
+            )
+
+        # Check remaining sessions
+        remaining = pt_session["total_sessions"] - pt_session["used_sessions"]
+        if remaining <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "NO_SESSION_REMAINING", "message": "Sesi PT member sudah habis"},
+            )
+
+        # Check if expired
+        if pt_session["expire_date"] < date.today():
+            cursor.execute(
+                "UPDATE member_pt_sessions SET status = 'expired' WHERE id = %s",
+                (pt_session["id"],),
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "PT_EXPIRED", "message": "Paket PT member sudah expired"},
+            )
+
+        # Validate booking date
+        if request.booking_date < date.today():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "PAST_DATE", "message": "Tidak bisa booking untuk tanggal yang sudah lewat"},
+            )
+
+        # Check trainer availability
+        start_time = datetime.strptime(request.start_time, "%H:%M").time()
+        end_time = (datetime.combine(date.today(), start_time) + timedelta(minutes=pt_session["session_duration"])).time()
+
+        cursor.execute(
+            """
+            SELECT id FROM pt_bookings
+            WHERE trainer_id = %s AND booking_date = %s
+            AND status IN ('booked', 'completed')
+            AND (
+                (start_time <= %s AND end_time > %s)
+                OR (start_time < %s AND end_time >= %s)
+                OR (start_time >= %s AND end_time <= %s)
+            )
+            """,
+            (
+                pt_session["trainer_id"], request.booking_date,
+                start_time, start_time,
+                end_time, end_time,
+                start_time, end_time,
+            ),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "TRAINER_BUSY", "message": "Trainer tidak tersedia pada waktu tersebut"},
+            )
+
+        # Create booking
+        cursor.execute(
+            """
+            INSERT INTO pt_bookings
+            (branch_id, member_pt_session_id, user_id, trainer_id, booking_date, start_time, end_time, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                branch_id,
+                pt_session["id"],
+                request.user_id,
+                pt_session["trainer_id"],
+                request.booking_date,
+                start_time,
+                end_time,
+                "booked",
+                datetime.now(),
+            ),
+        )
+        booking_id = cursor.lastrowid
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"Booking PT berhasil untuk {member['name']}",
+            "data": {
+                "booking_id": booking_id,
+                "member_name": member["name"],
+                "trainer_name": pt_session["trainer_name"],
+                "booking_date": str(request.booking_date),
+                "start_time": str(start_time),
+                "end_time": str(end_time),
+                "remaining_sessions": remaining - 1,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error booking PT for member: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "BOOK_PT_FOR_MEMBER_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ============== Calendar Endpoints ==============
+
+@router.get("/bookings/calendar")
+def get_pt_bookings_calendar(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    branch_id: Optional[int] = Depends(get_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get PT bookings summary grouped by date for calendar view"""
+    check_permission(auth, "trainer.view")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        branch_filter = ""
+        params_summary = [start_date, end_date]
+        params_bookings = [start_date, end_date]
+        if branch_id:
+            branch_filter = " AND pb.branch_id = %s"
+            params_summary.append(branch_id)
+            params_bookings.append(branch_id)
+
+        # Get booking counts per date
+        cursor.execute(
+            f"""
+            SELECT pb.booking_date,
+                   COUNT(*) as total_bookings,
+                   SUM(CASE WHEN pb.status = 'booked' THEN 1 ELSE 0 END) as booked_count,
+                   SUM(CASE WHEN pb.status = 'completed' THEN 1 ELSE 0 END) as completed_count
+            FROM pt_bookings pb
+            WHERE pb.booking_date BETWEEN %s AND %s
+            AND pb.status != 'cancelled'
+            {branch_filter}
+            GROUP BY pb.booking_date
+            ORDER BY pb.booking_date
+            """,
+            params_summary,
+        )
+        date_summary = cursor.fetchall()
+
+        for d in date_summary:
+            d["booking_date"] = str(d["booking_date"])
+
+        # Get bookings grouped by date
+        cursor.execute(
+            f"""
+            SELECT pb.booking_date, pb.id as booking_id,
+                   pb.start_time, pb.end_time, pb.status,
+                   u_member.name as member_name,
+                   u_trainer.name as trainer_name
+            FROM pt_bookings pb
+            JOIN users u_member ON pb.user_id = u_member.id
+            JOIN trainers t ON pb.trainer_id = t.id
+            JOIN users u_trainer ON t.user_id = u_trainer.id
+            WHERE pb.booking_date BETWEEN %s AND %s
+            AND pb.status != 'cancelled'
+            {branch_filter}
+            ORDER BY pb.booking_date, pb.start_time
+            """,
+            params_bookings,
+        )
+        bookings_raw = cursor.fetchall()
+
+        bookings_by_date = {}
+        for b in bookings_raw:
+            d = str(b["booking_date"])
+            b["booking_date"] = d
+            b["start_time"] = str(b["start_time"])
+            b["end_time"] = str(b["end_time"])
+            if d not in bookings_by_date:
+                bookings_by_date[d] = []
+            bookings_by_date[d].append(b)
+
+        return {
+            "success": True,
+            "data": {
+                "date_summary": date_summary,
+                "bookings_by_date": bookings_by_date,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting PT bookings calendar: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_PT_CALENDAR_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/bookings/date/{booking_date}")
+def get_pt_bookings_by_date(
+    booking_date: date,
+    branch_id: Optional[int] = Depends(get_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get detailed PT bookings for a specific date"""
+    check_permission(auth, "trainer.view")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        branch_filter = ""
+        params = [booking_date]
+        if branch_id:
+            branch_filter = " AND pb.branch_id = %s"
+            params.append(branch_id)
+
+        cursor.execute(
+            f"""
+            SELECT pb.id, pb.booking_date, pb.start_time, pb.end_time,
+                   pb.status, pb.notes, pb.completed_at,
+                   u_member.name as member_name, u_member.email as member_email,
+                   u_member.phone as member_phone,
+                   u_trainer.name as trainer_name,
+                   t.id as trainer_id, t.specialization,
+                   pp.name as package_name,
+                   b.name as branch_name
+            FROM pt_bookings pb
+            JOIN users u_member ON pb.user_id = u_member.id
+            JOIN trainers t ON pb.trainer_id = t.id
+            JOIN users u_trainer ON t.user_id = u_trainer.id
+            JOIN member_pt_sessions mps ON pb.member_pt_session_id = mps.id
+            JOIN pt_packages pp ON mps.pt_package_id = pp.id
+            LEFT JOIN branches b ON pb.branch_id = b.id
+            WHERE pb.booking_date = %s
+            AND pb.status != 'cancelled'
+            {branch_filter}
+            ORDER BY pb.start_time ASC
+            """,
+            params,
+        )
+        bookings = cursor.fetchall()
+
+        for b in bookings:
+            b["booking_date"] = str(b["booking_date"])
+            b["start_time"] = str(b["start_time"])
+            b["end_time"] = str(b["end_time"])
+            if b.get("completed_at"):
+                b["completed_at"] = str(b["completed_at"])
+
+        return {
+            "success": True,
+            "data": bookings,
+            "date": str(booking_date),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting PT bookings by date: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_PT_DATE_BOOKINGS_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

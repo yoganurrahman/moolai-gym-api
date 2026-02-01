@@ -71,7 +71,7 @@ def scan_checkin(branch_id: int = Depends(require_branch_id), auth: dict = Depen
                 """
                 SELECT mcp.*, cpt.name as pass_name
                 FROM member_class_passes mcp
-                JOIN class_pass_types cpt ON mcp.class_pass_type_id = cpt.id
+                JOIN class_packages cpt ON mcp.class_package_id = cpt.id
                 WHERE mcp.user_id = %s AND mcp.status = 'active' AND mcp.remaining_classes > 0
                   AND (mcp.expire_date IS NULL OR mcp.expire_date >= %s)
                 ORDER BY mcp.expire_date ASC
