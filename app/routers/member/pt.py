@@ -109,12 +109,22 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
             if tid is None:
                 continue
             if tid not in per_trainer:
+                expire_dt = s.get("expire_date")
                 per_trainer[tid] = {
                     "trainer_id": tid,
                     "trainer_name": s.get("trainer_name") or "Trainer",
+                    "package_name": s.get("package_name"),
                     "remaining_sessions": 0,
+                    "expire_date": expire_dt.isoformat() if expire_dt else None,
                 }
             per_trainer[tid]["remaining_sessions"] += s["remaining_sessions"]
+            # Keep the earliest expire_date
+            current_expire = per_trainer[tid].get("expire_date")
+            new_expire = s.get("expire_date")
+            if new_expire:
+                new_expire_str = new_expire.isoformat() if hasattr(new_expire, 'isoformat') else str(new_expire)
+                if current_expire is None or new_expire_str < current_expire:
+                    per_trainer[tid]["expire_date"] = new_expire_str
 
         return {
             "success": True,

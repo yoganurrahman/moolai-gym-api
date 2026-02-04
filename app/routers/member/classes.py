@@ -103,7 +103,7 @@ def get_class_schedules(
         cursor.execute(
             f"""
             SELECT cs.*,
-                   ct.name as class_name, ct.description as class_description, ct.color,
+                   ct.name as class_name, ct.description as class_description, ct.color, ct.image as class_image,
                    u.name as trainer_name,
                    br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
@@ -154,6 +154,7 @@ def get_class_schedules(
                         "class_type_id": schedule["class_type_id"],
                         "class_name": schedule["class_name"],
                         "class_description": schedule["class_description"],
+                        "class_image": schedule["class_image"],
                         "color": schedule["color"],
                         "trainer_name": schedule["trainer_name"],
                         "branch_name": schedule["branch_name"],
@@ -285,19 +286,24 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
                 },
             )
 
-        # Check if already booked
+        # Check if already booked (active or cancelled)
         cursor.execute(
             """
-            SELECT id FROM class_bookings
-            WHERE user_id = %s AND schedule_id = %s AND class_date = %s AND status != 'cancelled'
+            SELECT id, status FROM class_bookings
+            WHERE user_id = %s AND schedule_id = %s AND class_date = %s
             """,
             (user_id, request.schedule_id, request.class_date),
         )
-        if cursor.fetchone():
+        existing_booking = cursor.fetchone()
+
+        if existing_booking and existing_booking["status"] != "cancelled":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error_code": "ALREADY_BOOKED", "message": "Anda sudah booking kelas ini"},
             )
+
+        # If there's a cancelled booking, we'll reactivate it instead of creating new
+        reactivate_booking_id = existing_booking["id"] if existing_booking else None
 
         # Check capacity
         cursor.execute(
@@ -374,19 +380,34 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
                     },
                 )
 
-        # Create booking
-        cursor.execute(
-            """
-            INSERT INTO class_bookings
-            (branch_id, user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
-             status, booked_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (schedule["branch_id"], user_id, request.schedule_id, request.class_date, access_type,
-             booking_membership_id, booking_class_pass_id,
-             "booked", datetime.now(), datetime.now()),
-        )
-        booking_id = cursor.lastrowid
+        # Create or reactivate booking
+        if reactivate_booking_id:
+            # Reactivate cancelled booking
+            cursor.execute(
+                """
+                UPDATE class_bookings
+                SET access_type = %s, membership_id = %s, class_pass_id = %s,
+                    status = 'booked', booked_at = %s, cancelled_at = NULL, updated_at = %s
+                WHERE id = %s
+                """,
+                (access_type, booking_membership_id, booking_class_pass_id,
+                 datetime.now(), datetime.now(), reactivate_booking_id),
+            )
+            booking_id = reactivate_booking_id
+        else:
+            # Create new booking
+            cursor.execute(
+                """
+                INSERT INTO class_bookings
+                (branch_id, user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
+                 status, booked_at, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (schedule["branch_id"], user_id, request.schedule_id, request.class_date, access_type,
+                 booking_membership_id, booking_class_pass_id,
+                 "booked", datetime.now(), datetime.now()),
+            )
+            booking_id = cursor.lastrowid
         conn.commit()
 
         return {
