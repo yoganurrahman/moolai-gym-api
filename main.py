@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import routers
-from app.routers import health, auth
+from app.routers import health, auth, images
 from app.routers.cms import router as cms_router
 from app.routers.member import router as member_router
 from app.routers.trainer import router as trainer_router
@@ -69,9 +70,15 @@ def root():
 # Include routers
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(images.router)
 app.include_router(cms_router)
 app.include_router(member_router)
 app.include_router(trainer_router)
+
+# Serve uploaded images as static files
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads/images")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+app.mount("/uploads/images", StaticFiles(directory=UPLOAD_DIR), name="uploaded-images")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
             """
             SELECT u.id, u.email, u.name, u.phone, u.address, u.date_of_birth, u.gender,
                    u.avatar, u.has_pin, u.default_branch_id, u.created_at,
-                   b.code as default_branch_code, b.name as default_branch_name
+                   b.code as default_branch_code, b.name as default_branch_name, b.city as default_branch_city
             FROM users u
             LEFT JOIN branches b ON u.default_branch_id = b.id
             WHERE u.id = %s
@@ -67,11 +67,13 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
                 "id": user.pop("default_branch_id"),
                 "code": user.pop("default_branch_code"),
                 "name": user.pop("default_branch_name"),
+                "city": user.pop("default_branch_city"),
             }
         else:
             user.pop("default_branch_id", None)
             user.pop("default_branch_code", None)
             user.pop("default_branch_name", None)
+            user.pop("default_branch_city", None)
         user["default_branch"] = default_branch
 
         # Get active membership
@@ -176,7 +178,7 @@ def set_default_branch(request: SetDefaultBranchRequest, auth: dict = Depends(ve
         # If branch_id provided, validate it exists and is active
         if request.branch_id is not None:
             cursor.execute(
-                "SELECT id, code, name FROM branches WHERE id = %s AND is_active = 1",
+                "SELECT id, code, name, city FROM branches WHERE id = %s AND is_active = 1",
                 (request.branch_id,),
             )
             branch = cursor.fetchone()

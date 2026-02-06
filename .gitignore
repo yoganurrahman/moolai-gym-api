@@ -76,3 +76,8 @@ venv.bak/
 # Logs
 *.log
 logs/
+
+# Uploads
+uploads/
+
+

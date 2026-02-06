@@ -38,20 +38,51 @@ def _generate_transaction_code():
 # ============== Endpoints ==============
 
 @router.get("/types")
-def get_class_types(auth: dict = Depends(verify_bearer_token)):
-    """Get all available class types"""
+def get_class_types(
+    include_stats: bool = Query(False),
+    limit: int = Query(10, ge=1, le=50),
+    auth: dict = Depends(verify_bearer_token)
+):
+    """Get all available class types with optional popularity stats"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute(
-            """
-            SELECT id, name, description, default_duration, color
-            FROM class_types
-            WHERE is_active = 1
-            ORDER BY name ASC
-            """
-        )
+        if include_stats:
+            # Enhanced query with booking statistics for popularity ranking
+            cursor.execute(
+                """
+                SELECT
+                    ct.id, ct.name, ct.description, ct.default_duration,
+                    ct.color,
+                    (SELECT file_path FROM images
+                     WHERE category = 'class'
+                       AND reference_id = ct.id
+                     ORDER BY sort_order ASC, id ASC
+                     LIMIT 1) as image,
+                    COUNT(cb.id) as total_bookings
+                FROM class_types ct
+                LEFT JOIN class_schedules cs ON ct.id = cs.class_type_id
+                LEFT JOIN class_bookings cb ON cs.id = cb.schedule_id
+                    AND cb.status IN ('booked', 'attended')
+                WHERE ct.is_active = 1
+                GROUP BY ct.id, ct.name, ct.description, ct.default_duration, ct.color
+                ORDER BY total_bookings DESC, ct.name ASC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+        else:
+            # Original simple query (backward compatible)
+            cursor.execute(
+                """
+                SELECT id, name, description, default_duration, color, image
+                FROM class_types
+                WHERE is_active = 1
+                ORDER BY name ASC
+                """
+            )
+
         class_types = cursor.fetchall()
 
         return {

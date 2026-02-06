@@ -406,7 +406,7 @@ def login(request: LoginRequest):
         default_branch = None
         if user.get("default_branch_id"):
             cursor.execute(
-                "SELECT id, code, name FROM branches WHERE id = %s",
+                "SELECT id, code, name, city FROM branches WHERE id = %s",
                 (user["default_branch_id"],),
             )
             default_branch = cursor.fetchone()
