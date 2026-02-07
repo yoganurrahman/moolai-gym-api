@@ -68,6 +68,12 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
             """
             SELECT cs.id, cs.day_of_week, cs.start_time, cs.end_time, cs.room, cs.capacity,
                    ct.name as class_name,
+                   COALESCE(
+                       (SELECT file_path FROM images
+                        WHERE category = 'class' AND reference_id = ct.id AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC LIMIT 1),
+                       ct.image
+                   ) as class_image,
                    br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
@@ -102,6 +108,18 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
         profile["assigned_branches"] = branches
 
         profile["class_schedules"] = schedules
+
+        # Get trainer image from images table
+        cursor.execute(
+            """
+            SELECT file_path FROM images
+            WHERE category = 'pt' AND reference_id = %s AND is_active = 1
+            ORDER BY sort_order ASC, id ASC LIMIT 1
+            """,
+            (profile["trainer_id"],),
+        )
+        img_row = cursor.fetchone()
+        profile["trainer_image"] = img_row["file_path"] if img_row else None
 
         # Get PT stats
         cursor.execute(

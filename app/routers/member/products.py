@@ -122,7 +122,13 @@ def get_products(
         data_params = ([branch_id] + params + [limit, offset]) if branch_id else (params + [limit, offset])
         cursor.execute(
             f"""
-            SELECT p.id, p.name, p.description, p.price, p.image,
+            SELECT p.id, p.name, p.description, p.price,
+                   COALESCE(
+                       (SELECT file_path FROM images
+                        WHERE category = 'product' AND reference_id = p.id AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC LIMIT 1),
+                       p.image
+                   ) as image,
                    p.is_rental, p.rental_duration,
                    pc.name as category_name{branch_select}
             FROM products p

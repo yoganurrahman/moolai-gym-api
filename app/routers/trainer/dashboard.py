@@ -99,9 +99,22 @@ def get_dashboard_summary(
         )
         active_clients = cursor.fetchone()["total"]
 
+        # Trainer profile image from images table
+        cursor.execute(
+            """
+            SELECT file_path FROM images
+            WHERE category = 'pt' AND reference_id = %s AND is_active = 1
+            ORDER BY sort_order ASC, id ASC LIMIT 1
+            """,
+            (trainer_id,),
+        )
+        img_row = cursor.fetchone()
+        trainer_image = img_row["file_path"] if img_row else None
+
         return {
             "success": True,
             "data": {
+                "trainer_image": trainer_image,
                 "today": {
                     "pt_bookings": pt_today["total"],
                     "pt_upcoming": pt_today["upcoming"],
@@ -152,6 +165,12 @@ def get_my_class_schedule(
         # Get recurring schedules
         recurring_sql = """
             SELECT cs.*, ct.name as class_name, ct.description as class_description,
+                   COALESCE(
+                       (SELECT file_path FROM images
+                        WHERE category = 'class' AND reference_id = ct.id AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC LIMIT 1),
+                       ct.image
+                   ) as class_image,
                    br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
@@ -192,7 +211,9 @@ def get_my_class_schedule(
 
                     day_classes.append({
                         "schedule_id": s["id"],
+                        "class_type_id": s["class_type_id"],
                         "class_name": s["class_name"],
+                        "class_image": s.get("class_image"),
                         "start_time": str(s["start_time"]),
                         "end_time": str(s["end_time"]),
                         "room": s["room"],

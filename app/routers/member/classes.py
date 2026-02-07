@@ -76,7 +76,13 @@ def get_class_types(
             # Original simple query (backward compatible)
             cursor.execute(
                 """
-                SELECT id, name, description, default_duration, color, image
+                SELECT id, name, description, default_duration, color,
+                       (SELECT file_path FROM images
+                        WHERE category = 'class'
+                          AND reference_id = class_types.id
+                          AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC
+                        LIMIT 1) as image
                 FROM class_types
                 WHERE is_active = 1
                 ORDER BY name ASC
@@ -134,7 +140,13 @@ def get_class_schedules(
         cursor.execute(
             f"""
             SELECT cs.*,
-                   ct.name as class_name, ct.description as class_description, ct.color, ct.image as class_image,
+                   ct.name as class_name, ct.description as class_description, ct.color,
+                   COALESCE(
+                       (SELECT file_path FROM images
+                        WHERE category = 'class' AND reference_id = ct.id AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC LIMIT 1),
+                       ct.image
+                   ) as class_image,
                    u.name as trainer_name,
                    br.name as branch_name, br.code as branch_code
             FROM class_schedules cs
