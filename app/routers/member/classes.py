@@ -107,6 +107,208 @@ def get_class_types(
         conn.close()
 
 
+@router.get("/types/{class_type_id}")
+def get_class_type_detail(
+    class_type_id: int,
+    branch_id: Optional[int] = Depends(get_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get class type detail with images, upcoming schedules, and user access info"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # 1. Get class type
+        cursor.execute(
+            """
+            SELECT id, name, description, default_duration, color
+            FROM class_types
+            WHERE id = %s AND is_active = 1
+            """,
+            (class_type_id,),
+        )
+        class_type = cursor.fetchone()
+        if not class_type:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "CLASS_TYPE_NOT_FOUND", "message": "Kelas tidak ditemukan"},
+            )
+
+        # 2. Get all images
+        cursor.execute(
+            """
+            SELECT file_path, title, sort_order
+            FROM images
+            WHERE category = 'class' AND reference_id = %s AND is_active = 1
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (class_type_id,),
+        )
+        images = cursor.fetchall()
+
+        # 3. Get upcoming schedules (next 14 days)
+        date_from = date.today()
+        date_to = date_from + timedelta(days=13)
+
+        where_clauses = ["cs.is_active = 1", "cs.class_type_id = %s"]
+        params = [class_type_id]
+
+        if branch_id:
+            where_clauses.append("cs.branch_id = %s")
+            params.append(branch_id)
+
+        where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        cursor.execute(
+            f"""
+            SELECT cs.id, cs.day_of_week, cs.start_time, cs.end_time,
+                   cs.capacity, cs.room,
+                   u.name as trainer_name,
+                   br.name as branch_name, br.code as branch_code
+            FROM class_schedules cs
+            LEFT JOIN trainers t ON cs.trainer_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            LEFT JOIN branches br ON cs.branch_id = br.id
+            {where_sql}
+            ORDER BY cs.day_of_week ASC, cs.start_time ASC
+            """,
+            params,
+        )
+        schedules = cursor.fetchall()
+
+        # Collect all schedule IDs for batch queries
+        schedule_ids = [s["id"] for s in schedules]
+
+        # Batch: booking counts per (schedule_id, class_date)
+        booking_counts = {}
+        user_bookings = {}
+        if schedule_ids:
+            placeholders = ",".join(["%s"] * len(schedule_ids))
+
+            cursor.execute(
+                f"""
+                SELECT schedule_id, class_date, COUNT(*) as booked
+                FROM class_bookings
+                WHERE schedule_id IN ({placeholders})
+                  AND class_date BETWEEN %s AND %s
+                  AND status IN ('booked', 'attended')
+                GROUP BY schedule_id, class_date
+                """,
+                schedule_ids + [date_from, date_to],
+            )
+            for row in cursor.fetchall():
+                key = (row["schedule_id"], str(row["class_date"]))
+                booking_counts[key] = row["booked"]
+
+            # Batch: user's bookings
+            cursor.execute(
+                f"""
+                SELECT id, schedule_id, class_date
+                FROM class_bookings
+                WHERE user_id = %s
+                  AND schedule_id IN ({placeholders})
+                  AND class_date BETWEEN %s AND %s
+                  AND status != 'cancelled'
+                """,
+                [auth["user_id"]] + schedule_ids + [date_from, date_to],
+            )
+            for row in cursor.fetchall():
+                key = (row["schedule_id"], str(row["class_date"]))
+                user_bookings[key] = row["id"]
+
+        # Build schedule list with dates
+        upcoming = []
+        current_date = date_from
+        while current_date <= date_to:
+            day_of_week_sunday = (current_date.weekday() + 1) % 7
+
+            for schedule in schedules:
+                if schedule["day_of_week"] == day_of_week_sunday:
+                    key = (schedule["id"], str(current_date))
+                    booked = booking_counts.get(key, 0)
+                    user_booking_id = user_bookings.get(key)
+                    capacity = schedule["capacity"]
+
+                    upcoming.append({
+                        "id": schedule["id"],
+                        "class_date": str(current_date),
+                        "start_time": str(schedule["start_time"]),
+                        "end_time": str(schedule["end_time"]),
+                        "trainer_name": schedule["trainer_name"],
+                        "branch_name": schedule["branch_name"],
+                        "branch_code": schedule["branch_code"],
+                        "room": schedule["room"],
+                        "capacity": capacity,
+                        "booked_count": booked,
+                        "available_slots": capacity - booked,
+                        "is_full": booked >= capacity,
+                        "is_booked": user_booking_id is not None,
+                        "booking_id": user_booking_id,
+                    })
+
+            current_date += timedelta(days=1)
+
+        # 4. Check user access
+        # Membership with class access
+        cursor.execute(
+            """
+            SELECT mm.id, mm.class_remaining, mp.include_classes
+            FROM member_memberships mm
+            JOIN membership_packages mp ON mm.package_id = mp.id
+            WHERE mm.user_id = %s AND mm.status = 'active'
+            ORDER BY mm.created_at DESC
+            LIMIT 1
+            """,
+            (auth["user_id"],),
+        )
+        membership = cursor.fetchone()
+        has_membership_access = False
+        if membership and membership["include_classes"]:
+            if membership["class_remaining"] is None or membership["class_remaining"] > 0:
+                has_membership_access = True
+
+        # Class pass remaining
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(remaining_classes), 0) as total_remaining
+            FROM member_class_passes
+            WHERE user_id = %s AND status = 'active'
+            """,
+            (auth["user_id"],),
+        )
+        class_pass_row = cursor.fetchone()
+        class_pass_remaining = class_pass_row["total_remaining"] if class_pass_row else 0
+
+        access_info = {
+            "has_membership_access": has_membership_access,
+            "has_class_pass": class_pass_remaining > 0,
+            "class_pass_remaining": class_pass_remaining,
+            "has_any_access": has_membership_access or class_pass_remaining > 0,
+        }
+
+        return {
+            "success": True,
+            "data": {
+                "class_type": class_type,
+                "images": images,
+                "upcoming_schedules": upcoming,
+                "access_info": access_info,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting class type detail: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_CLASS_TYPE_DETAIL_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.get("/schedules")
 def get_class_schedules(
     class_type_id: Optional[int] = Query(None),
