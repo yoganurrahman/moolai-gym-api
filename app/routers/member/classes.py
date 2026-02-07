@@ -610,7 +610,13 @@ def get_my_bookings(
         cursor.execute(
             f"""
             SELECT cb.*, cs.start_time, cs.end_time, cs.room,
+                   cs.class_type_id,
                    ct.name as class_name, ct.color,
+                   (SELECT file_path FROM images
+                    WHERE category = 'class'
+                      AND reference_id = ct.id
+                    ORDER BY sort_order ASC, id ASC
+                    LIMIT 1) as class_image,
                    u.name as trainer_name,
                    br.name as branch_name, br.code as branch_code
             FROM class_bookings cb

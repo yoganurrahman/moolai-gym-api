@@ -88,7 +88,12 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
         cursor.execute(
             """
             SELECT mps.*, pp.name as package_name, t.user_id as trainer_user_id,
-                   u.name as trainer_name
+                   u.name as trainer_name,
+                   (SELECT file_path FROM images
+                    WHERE category = 'pt'
+                      AND reference_id = t.id
+                    ORDER BY sort_order ASC, id ASC
+                    LIMIT 1) as trainer_image
             FROM member_pt_sessions mps
             JOIN pt_packages pp ON mps.pt_package_id = pp.id
             LEFT JOIN trainers t ON mps.trainer_id = t.id
@@ -113,6 +118,7 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
                 per_trainer[tid] = {
                     "trainer_id": tid,
                     "trainer_name": s.get("trainer_name") or "Trainer",
+                    "trainer_image": s.get("trainer_image"),
                     "package_name": s.get("package_name"),
                     "remaining_sessions": 0,
                     "expire_date": expire_dt.isoformat() if expire_dt else None,
@@ -149,6 +155,8 @@ def get_my_pt_sessions(auth: dict = Depends(verify_bearer_token)):
 @router.get("/trainers")
 def get_available_trainers(
     specialization: Optional[str] = Query(None),
+    include_stats: bool = Query(False),
+    limit: int = Query(10, ge=1, le=50),
     branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
@@ -169,17 +177,30 @@ def get_available_trainers(
             where_clause += " AND t.specialization LIKE %s"
             params.append(f"%{specialization}%")
 
+        # Always include total_bookings for rating calculation
+        order_by = "total_bookings DESC, u.name ASC" if include_stats else "u.name ASC"
         cursor.execute(
             f"""
             SELECT t.id, t.specialization, t.bio,
-                   u.name, u.email, u.phone, u.avatar as profile_photo
+                   u.name, u.email, u.phone, u.avatar as profile_photo,
+                   (SELECT file_path FROM images
+                    WHERE category = 'pt'
+                      AND reference_id = t.id
+                    ORDER BY sort_order ASC, id ASC
+                    LIMIT 1) as image,
+                   COUNT(pb.id) as total_bookings
             FROM trainers t
             {join_clause}
             JOIN users u ON t.user_id = u.id
+            LEFT JOIN pt_bookings pb
+                   ON pb.trainer_id = t.id
+                   AND pb.status IN ('booked', 'completed')
             WHERE {where_clause}
-            ORDER BY u.name ASC
+            GROUP BY t.id, t.specialization, t.bio, u.name, u.email, u.phone, u.avatar
+            ORDER BY {order_by}
+            LIMIT %s
             """,
-            params,
+            params + [limit],
         )
         trainers = cursor.fetchall()
 
@@ -461,6 +482,11 @@ def get_my_pt_bookings(
         cursor.execute(
             f"""
             SELECT pb.*, u.name as trainer_name,
+                   (SELECT file_path FROM images
+                    WHERE category = 'pt'
+                      AND reference_id = t.id
+                    ORDER BY sort_order ASC, id ASC
+                    LIMIT 1) as trainer_image,
                    br.name as branch_name, br.code as branch_code
             FROM pt_bookings pb
             JOIN trainers t ON pb.trainer_id = t.id

@@ -78,6 +78,7 @@ def get_categories(auth: dict = Depends(verify_bearer_token)):
 def get_products(
     category_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
+    include_images: bool = Query(False),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),
@@ -135,6 +136,33 @@ def get_products(
         )
         products = cursor.fetchall()
 
+        # Get product IDs for images query
+        product_ids = [p["id"] for p in products]
+
+        # Load images from images table if requested
+        product_images = {}
+        if include_images and product_ids:
+            placeholders = ",".join(["%s"] * len(product_ids))
+            cursor.execute(
+                f"""
+                SELECT reference_id, file_path, title, sort_order
+                FROM images
+                WHERE category = 'product'
+                  AND reference_id IN ({placeholders})
+                  AND is_active = 1
+                ORDER BY sort_order ASC, id ASC
+                """,
+                product_ids,
+            )
+            for img in cursor.fetchall():
+                ref_id = img["reference_id"]
+                if ref_id not in product_images:
+                    product_images[ref_id] = []
+                product_images[ref_id].append({
+                    "file_path": img["file_path"],
+                    "title": img["title"],
+                })
+
         for p in products:
             p["price"] = float(p["price"]) if p.get("price") else 0
             p["is_rental"] = bool(p.get("is_rental"))
@@ -143,6 +171,10 @@ def get_products(
                 p["branch_stock"] = b_stock if b_stock is not None else 0
             else:
                 p["branch_stock"] = 0
+
+            # Add images from images table
+            if include_images:
+                p["images"] = product_images.get(p["id"], [])
 
         return {
             "success": True,
