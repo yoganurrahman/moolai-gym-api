@@ -113,7 +113,7 @@ def get_public_images(
         cursor.execute(
             f"""
             SELECT i.id, i.category, i.reference_id, i.title, i.description,
-                   i.file_path, i.sort_order, i.deep_link, i.platform
+                   i.file_path, i.sort_order, i.deep_link, i.platform, i.created_at
             FROM images i
             {where_sql}
             ORDER BY i.sort_order ASC, i.created_at DESC
@@ -122,6 +122,10 @@ def get_public_images(
             params + [limit],
         )
         images = cursor.fetchall()
+
+        for img in images:
+            if img.get("created_at") and hasattr(img["created_at"], "isoformat"):
+                img["created_at"] = img["created_at"].isoformat()
 
         return {
             "success": True,
