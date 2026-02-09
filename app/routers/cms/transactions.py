@@ -1,7 +1,8 @@
 """
-Transactions Router - Checkout, History
+Transactions Router - Checkout, History, Approve/Reject Payment
 Hybrid transaction system for all item types
 """
+import json
 import logging
 import uuid
 from datetime import datetime, date, timedelta
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
 from app.middleware import verify_bearer_token, verify_pin_token, check_permission, get_branch_id, require_branch_id
+from app.utils.helpers import verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +45,60 @@ class CheckoutRequest(BaseModel):
 
 
 class RefundRequest(BaseModel):
+    pin: str = Field(..., min_length=1)
     reason: str = Field(..., min_length=1)
 
 
 # ============== Helper Functions ==============
+
+MAX_PIN_ATTEMPTS = 3
+PIN_LOCKOUT_DURATION_MINUTES = 15
+
+
+def verify_pin_inline(cursor, conn, user_id: int, pin: str):
+    """Verify PIN inline for sensitive operations. Raises HTTPException on failure."""
+    cursor.execute(
+        "SELECT pin, has_pin, failed_pin_attempts, pin_locked_until FROM users WHERE id = %s",
+        (user_id,),
+    )
+    user = cursor.fetchone()
+    if not user or not user["has_pin"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error_code": "PIN_NOT_SET", "message": "PIN belum diatur"},
+        )
+
+    if user["pin_locked_until"] and datetime.now() < user["pin_locked_until"]:
+        remaining = int((user["pin_locked_until"] - datetime.now()).total_seconds() / 60)
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail={"error_code": "PIN_LOCKED", "message": f"PIN terkunci. Coba lagi dalam {remaining} menit."},
+        )
+
+    if not verify_password(pin, user["pin"]):
+        failed = (user["failed_pin_attempts"] or 0) + 1
+        if failed >= MAX_PIN_ATTEMPTS:
+            locked_until = datetime.now() + timedelta(minutes=PIN_LOCKOUT_DURATION_MINUTES)
+            cursor.execute(
+                "UPDATE users SET failed_pin_attempts = %s, pin_locked_until = %s WHERE id = %s",
+                (failed, locked_until, user_id),
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail={"error_code": "PIN_LOCKED", "message": f"Terlalu banyak percobaan. PIN terkunci selama {PIN_LOCKOUT_DURATION_MINUTES} menit."},
+            )
+        cursor.execute("UPDATE users SET failed_pin_attempts = %s WHERE id = %s", (failed, user_id))
+        conn.commit()
+        remaining = MAX_PIN_ATTEMPTS - failed
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error_code": "INVALID_PIN", "message": f"PIN salah. Sisa percobaan: {remaining}"},
+        )
+
+    # Reset failed attempts on success
+    cursor.execute("UPDATE users SET failed_pin_attempts = 0, pin_locked_until = NULL WHERE id = %s", (user_id,))
+
 
 def generate_transaction_code(branch_code: str = ""):
     prefix = f"TRX-{branch_code}-" if branch_code else "TRX-"
@@ -724,10 +776,12 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
         cursor.execute(
             """
             SELECT t.*, b.name as branch_name, b.code as branch_code,
-                   p.name as promo_name, p.promo_type, p.discount_value as promo_discount_value
+                   p.name as promo_name, p.promo_type, p.discount_value as promo_discount_value,
+                   approver.name as approved_by_name
             FROM transactions t
             LEFT JOIN branches b ON t.branch_id = b.id
             LEFT JOIN promos p ON t.promo_id = p.id
+            LEFT JOIN users approver ON t.approved_by = approver.id
             WHERE t.id = %s
             """,
             (transaction_id,),
@@ -914,7 +968,6 @@ def refund_transaction(
     transaction_id: int,
     request: RefundRequest,
     auth: dict = Depends(verify_bearer_token),
-    pin_auth: dict = Depends(verify_pin_token),
 ):
     """Refund a transaction (requires PIN verification)"""
     check_permission(auth, "transaction.update")
@@ -923,6 +976,9 @@ def refund_transaction(
     cursor = conn.cursor(dictionary=True)
 
     try:
+        # Verify PIN inline
+        verify_pin_inline(cursor, conn, auth["user_id"], request.pin)
+
         # Get transaction
         cursor.execute(
             "SELECT * FROM transactions WHERE id = %s AND payment_status = 'paid'",
@@ -1041,6 +1097,321 @@ def refund_transaction(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "REFUND_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ============== Approve / Reject Payment ==============
+
+class ApproveRejectRequest(BaseModel):
+    pin: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@router.post("/{transaction_id}/approve-payment")
+def approve_payment(
+    transaction_id: int,
+    request: ApproveRejectRequest = ApproveRejectRequest(),
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Approve pending payment — activate items, deduct stock, mark as paid"""
+    check_permission(auth, "transaction.update")
+
+    if not request.pin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error_code": "PIN_REQUIRED", "message": "PIN diperlukan untuk menyetujui pembayaran"},
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Verify PIN inline
+        verify_pin_inline(cursor, conn, auth["user_id"], request.pin)
+
+        # Get transaction
+        cursor.execute(
+            "SELECT * FROM transactions WHERE id = %s AND payment_status = 'pending'",
+            (transaction_id,),
+        )
+        transaction = cursor.fetchone()
+
+        if not transaction:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "TRANSACTION_NOT_FOUND", "message": "Transaksi pending tidak ditemukan"},
+            )
+
+        # Get transaction items
+        cursor.execute(
+            "SELECT * FROM transaction_items WHERE transaction_id = %s",
+            (transaction_id,),
+        )
+        items = cursor.fetchall()
+
+        target_user_id = transaction["user_id"]
+
+        for item in items:
+            metadata = json.loads(item["metadata"]) if item.get("metadata") else {}
+            details = metadata.get("details", {})
+
+            if item["item_type"] == "product":
+                # Deduct stock from branch_product_stock
+                cursor.execute(
+                    "SELECT stock FROM branch_product_stock WHERE branch_id = %s AND product_id = %s",
+                    (branch_id, item["item_id"]),
+                )
+                stock_row = cursor.fetchone()
+                current_stock = stock_row["stock"] if stock_row else 0
+
+                cursor.execute(
+                    "UPDATE branch_product_stock SET stock = stock - %s WHERE branch_id = %s AND product_id = %s AND stock >= %s",
+                    (item["quantity"], branch_id, item["item_id"], item["quantity"]),
+                )
+                if cursor.rowcount == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "INSUFFICIENT_STOCK",
+                            "message": f"Stok {item['item_name']} tidak mencukupi di cabang ini",
+                        },
+                    )
+
+                # Log stock change
+                cursor.execute(
+                    """
+                    INSERT INTO product_stock_logs
+                    (product_id, branch_id, type, quantity, stock_before, stock_after, reference_type, reference_id, created_by, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        item["item_id"],
+                        branch_id,
+                        "out",
+                        item["quantity"],
+                        current_stock,
+                        current_stock - item["quantity"],
+                        "transaction",
+                        transaction_id,
+                        auth["user_id"],
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "membership" and target_user_id:
+                start_date_m = date.today()
+                end_date_m = None
+                visit_remaining = None
+
+                if details.get("visit_quota"):
+                    visit_remaining = details["visit_quota"]
+                elif details.get("duration_days"):
+                    end_date_m = start_date_m + timedelta(days=details["duration_days"])
+
+                membership_code = f"MBR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                cursor.execute(
+                    """
+                    INSERT INTO member_memberships
+                    (user_id, package_id, transaction_id, membership_code, start_date, end_date,
+                     visit_remaining, class_remaining, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        membership_code,
+                        start_date_m,
+                        end_date_m,
+                        visit_remaining,
+                        details.get("class_quota"),
+                        "active",
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "class_pass" and target_user_id:
+                start_date_c = date.today()
+                expire_date_c = start_date_c + timedelta(days=details.get("valid_days", 30))
+
+                cursor.execute(
+                    """
+                    INSERT INTO member_class_passes
+                    (user_id, class_package_id, transaction_id, total_classes, used_classes,
+                     start_date, expire_date, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        details.get("class_count", 1),
+                        0,
+                        start_date_c,
+                        expire_date_c,
+                        "active",
+                        datetime.now(),
+                    ),
+                )
+
+            elif item["item_type"] == "pt_package" and target_user_id:
+                start_date_p = date.today()
+                expire_date_p = start_date_p + timedelta(days=details.get("valid_days", 90))
+                trainer_id = metadata.get("trainer_id") or details.get("trainer_id")
+
+                cursor.execute(
+                    """
+                    INSERT INTO member_pt_sessions
+                    (user_id, pt_package_id, transaction_id, trainer_id, total_sessions, used_sessions,
+                     start_date, expire_date, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_user_id,
+                        item["item_id"],
+                        transaction_id,
+                        trainer_id,
+                        details.get("session_count", 1),
+                        0,
+                        start_date_p,
+                        expire_date_p,
+                        "active",
+                        datetime.now(),
+                    ),
+                )
+
+        # Update promo usage_count
+        if transaction.get("promo_id") and transaction.get("promo_discount") and float(transaction["promo_discount"]) > 0:
+            cursor.execute(
+                "UPDATE promos SET usage_count = usage_count + 1 WHERE id = %s",
+                (transaction["promo_id"],),
+            )
+            cursor.execute(
+                """
+                INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
+                VALUES ('promo', %s, %s, %s, %s, %s)
+                """,
+                (transaction["promo_id"], target_user_id, transaction_id, float(transaction["promo_discount"]), datetime.now()),
+            )
+
+        # Update voucher usage_count
+        if transaction.get("voucher_code") and transaction.get("voucher_discount") and float(transaction["voucher_discount"]) > 0:
+            cursor.execute(
+                "SELECT id FROM vouchers WHERE code = %s",
+                (transaction["voucher_code"],),
+            )
+            voucher_row = cursor.fetchone()
+            if voucher_row:
+                cursor.execute(
+                    "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
+                    (voucher_row["id"],),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
+                    VALUES ('voucher', %s, %s, %s, %s, %s)
+                    """,
+                    (voucher_row["id"], target_user_id, transaction_id, float(transaction["voucher_discount"]), datetime.now()),
+                )
+
+        # Mark transaction as paid
+        now = datetime.now()
+        cursor.execute(
+            """
+            UPDATE transactions
+            SET payment_status = 'paid', paid_amount = grand_total, paid_at = %s,
+                approved_by = %s, approved_at = %s, updated_at = %s,
+                notes = CONCAT(IFNULL(notes, ''), %s)
+            WHERE id = %s
+            """,
+            (
+                now, auth["user_id"], now, now,
+                f"\n[APPROVED] by staff #{auth['user_id']}" + (f" - {request.reason}" if request.reason else ""),
+                transaction_id,
+            ),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Pembayaran berhasil disetujui, item telah diaktifkan",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error approving payment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "APPROVE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/{transaction_id}/reject-payment")
+def reject_payment(
+    transaction_id: int,
+    request: ApproveRejectRequest = ApproveRejectRequest(),
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Reject pending payment — mark as failed"""
+    check_permission(auth, "transaction.update")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            "SELECT id, payment_status FROM transactions WHERE id = %s AND payment_status = 'pending'",
+            (transaction_id,),
+        )
+        transaction = cursor.fetchone()
+
+        if not transaction:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "TRANSACTION_NOT_FOUND", "message": "Transaksi pending tidak ditemukan"},
+            )
+
+        reason_text = request.reason or "Pembayaran ditolak"
+        cursor.execute(
+            """
+            UPDATE transactions
+            SET payment_status = 'failed', updated_at = %s,
+                notes = CONCAT(IFNULL(notes, ''), %s)
+            WHERE id = %s
+            """,
+            (
+                datetime.now(),
+                f"\n[REJECTED] {reason_text}",
+                transaction_id,
+            ),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Pembayaran ditolak",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error rejecting payment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "REJECT_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

@@ -7,7 +7,9 @@ import uuid
 from datetime import datetime, date, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException, status, Depends, Query
+import os
+
+from fastapi import APIRouter, HTTPException, status, Depends, Query, File, Form, UploadFile
 from pydantic import BaseModel, Field
 
 from app.db import get_db_connection
@@ -271,11 +273,6 @@ def member_checkout(
                         promo_discount = min(promo_discount, subtotal_after_discount)
                         subtotal_after_discount -= promo_discount
 
-                        cursor.execute(
-                            "UPDATE promos SET usage_count = IFNULL(usage_count, 0) + 1 WHERE id = %s",
-                            (promo["id"],),
-                        )
-
         # Apply voucher if provided
         voucher_discount = 0
         if request.voucher_code:
@@ -326,11 +323,6 @@ def member_checkout(
                     voucher_discount = min(voucher_discount, subtotal_after_discount)
                     subtotal_after_discount -= voucher_discount
 
-                    cursor.execute(
-                        "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
-                        (voucher["id"],),
-                    )
-
         # Calculate tax and service charge
         tax_amount = subtotal_after_discount * (tax_percentage / 100) if tax_enabled else 0
         service_charge_amount = subtotal_after_discount * (service_charge_percentage / 100) if service_charge_enabled else 0
@@ -365,9 +357,9 @@ def member_checkout(
                 service_charge_amount,
                 grand_total,
                 request.payment_method,
-                "paid",
-                grand_total,
-                datetime.now(),
+                "pending",
+                0,
+                None,
                 request.promo_id,
                 promo_discount,
                 request.voucher_code,
@@ -407,165 +399,13 @@ def member_checkout(
                 ),
             )
 
-            # Process based on item type
-            if item["item_type"] == "product" and not item["details"].get("is_rental"):
-                # Deduct stock from branch_product_stock
-                cursor.execute(
-                    "UPDATE branch_product_stock SET stock = stock - %s WHERE branch_id = %s AND product_id = %s AND stock >= %s",
-                    (item["quantity"], branch_id, item["item_id"], item["quantity"]),
-                )
-                if cursor.rowcount == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={
-                            "error_code": "INSUFFICIENT_STOCK",
-                            "message": f"Stok {item['item_name']} tidak mencukupi di cabang ini",
-                        },
-                    )
-
-                # Log stock change
-                cursor.execute(
-                    """
-                    INSERT INTO product_stock_logs
-                    (product_id, branch_id, type, quantity, stock_before, stock_after, reference_type, reference_id, created_by, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        item["item_id"],
-                        branch_id,
-                        "out",
-                        item["quantity"],
-                        item["details"]["stock"],
-                        item["details"]["stock"] - item["quantity"],
-                        "transaction",
-                        transaction_id,
-                        buyer_user_id,
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "membership":
-                # Activate membership for the member
-                details = item["details"]
-                start_date_m = date.today()
-                end_date_m = None
-                visit_remaining = None
-
-                if details.get("visit_quota"):
-                    visit_remaining = details["visit_quota"]
-                elif details.get("duration_days"):
-                    end_date_m = start_date_m + timedelta(days=details["duration_days"])
-
-                membership_code = f"MBR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-                cursor.execute(
-                    """
-                    INSERT INTO member_memberships
-                    (user_id, package_id, transaction_id, membership_code, start_date, end_date,
-                     visit_remaining, class_remaining, status, auto_renew, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        buyer_user_id,
-                        item["item_id"],
-                        transaction_id,
-                        membership_code,
-                        start_date_m,
-                        end_date_m,
-                        visit_remaining,
-                        details.get("class_quota"),
-                        "active",
-                        request.auto_renew,
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "class_pass":
-                # Create class pass for the member
-                details = item["details"]
-                start_date_c = date.today()
-                expire_date_c = start_date_c + timedelta(days=details.get("valid_days", 30))
-
-                cursor.execute(
-                    """
-                    INSERT INTO member_class_passes
-                    (user_id, class_package_id, transaction_id, total_classes, used_classes,
-                     start_date, expire_date, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        buyer_user_id,
-                        item["item_id"],
-                        transaction_id,
-                        details.get("class_count", 1),
-                        0,
-                        start_date_c,
-                        expire_date_c,
-                        "active",
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "pt_package":
-                # Create PT sessions for the member
-                details = item["details"]
-                trainer_id = item.get("trainer_id")
-                start_date_pt = date.today()
-                expire_date_pt = start_date_pt + timedelta(days=details.get("valid_days", 30))
-                session_count = details.get("session_count", 1)
-
-                # Insert one record per quantity purchased
-                # Note: remaining_sessions is a generated column, so we don't insert it
-                for _ in range(item["quantity"]):
-                    cursor.execute(
-                        """
-                        INSERT INTO member_pt_sessions
-                        (user_id, pt_package_id, trainer_id, transaction_id, total_sessions, used_sessions,
-                         start_date, expire_date, status, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            buyer_user_id,
-                            item["item_id"],
-                            trainer_id,
-                            transaction_id,
-                            session_count,
-                            0,  # used_sessions starts at 0
-                            start_date_pt,
-                            expire_date_pt,
-                            "active",
-                            datetime.now(),
-                        ),
-                    )
-
-        # Record discount usages
-        if promo_discount > 0 and request.promo_id:
-            cursor.execute(
-                """
-                INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                VALUES ('promo', %s, %s, %s, %s, %s)
-                """,
-                (request.promo_id, buyer_user_id, transaction_id, promo_discount, datetime.now()),
-            )
-        if voucher_discount > 0 and request.voucher_code:
-            cursor.execute(
-                "SELECT id FROM vouchers WHERE code = %s",
-                (request.voucher_code,),
-            )
-            voucher_row = cursor.fetchone()
-            if voucher_row:
-                cursor.execute(
-                    """
-                    INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                    VALUES ('voucher', %s, %s, %s, %s, %s)
-                    """,
-                    (voucher_row["id"], buyer_user_id, transaction_id, voucher_discount, datetime.now()),
-                )
+            # Item activation (stock deduct, membership, class pass, PT) happens on CMS approval
 
         conn.commit()
 
         return {
             "success": True,
-            "message": "Transaksi berhasil",
+            "message": "Checkout berhasil, silakan lakukan pembayaran",
             "data": {
                 "transaction_id": transaction_id,
                 "transaction_code": transaction_code,
@@ -596,6 +436,112 @@ def member_checkout(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "CHECKOUT_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/submit-payment")
+def submit_payment(
+    transaction_id: int = Form(...),
+    file: Optional[UploadFile] = File(None),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """
+    Submit payment for pending transaction.
+    For cash: must upload payment proof image.
+    For other methods: can submit without proof.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Get pending transaction owned by this user
+        cursor.execute(
+            "SELECT * FROM transactions WHERE id = %s AND user_id = %s AND payment_status = 'pending'",
+            (transaction_id, auth["user_id"]),
+        )
+        transaction = cursor.fetchone()
+
+        if not transaction:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "TRANSACTION_NOT_FOUND", "message": "Transaksi tidak ditemukan atau sudah diproses"},
+            )
+
+        # Cash payment requires proof
+        if transaction["payment_method"] == "cash" and file is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "PROOF_REQUIRED", "message": "Pembayaran tunai memerlukan bukti pembayaran"},
+            )
+
+        payment_proof_path = None
+
+        if file:
+            # Validate file type
+            allowed_types = ["image/jpeg", "image/png", "image/webp"]
+            if file.content_type not in allowed_types:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "INVALID_FILE_TYPE", "message": "Format file harus JPG, PNG, atau WebP"},
+                )
+
+            file_content = file.file.read()
+
+            # Validate file size (5MB max)
+            if len(file_content) > 5 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "FILE_TOO_LARGE", "message": "Ukuran file maksimal 5MB"},
+                )
+
+            # Save file
+            upload_dir = os.environ.get("UPLOAD_DIR", "uploads/images")
+            proof_dir = os.path.join(upload_dir, "payment_proof")
+            os.makedirs(proof_dir, exist_ok=True)
+
+            ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+            unique_name = f"{uuid.uuid4().hex}{ext}"
+            file_path = os.path.join(proof_dir, unique_name)
+
+            with open(file_path, "wb") as f:
+                f.write(file_content)
+
+            payment_proof_path = f"uploads/images/payment_proof/{unique_name}"
+
+        # Update transaction with payment proof
+        if payment_proof_path:
+            cursor.execute(
+                "UPDATE transactions SET payment_proof = %s, updated_at = %s WHERE id = %s",
+                (payment_proof_path, datetime.now(), transaction_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE transactions SET updated_at = %s WHERE id = %s",
+                (datetime.now(), transaction_id),
+            )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Pembayaran berhasil disubmit, menunggu persetujuan admin",
+            "data": {
+                "transaction_id": transaction_id,
+                "payment_proof": payment_proof_path,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error submitting payment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "SUBMIT_PAYMENT_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()
@@ -797,7 +743,8 @@ def get_my_transactions(
             SELECT t.id, t.transaction_code, t.subtotal, t.discount_amount,
                    t.promo_id, t.promo_discount, t.voucher_code, t.voucher_discount,
                    t.tax_amount, t.grand_total,
-                   t.payment_method, t.payment_status, t.paid_at, t.created_at,
+                   t.payment_method, t.payment_status, t.payment_proof,
+                   t.paid_at, t.created_at,
                    b.name as branch_name, b.code as branch_code,
                    p.name as promo_name
             FROM transactions t

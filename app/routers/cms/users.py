@@ -39,6 +39,10 @@ class UserResetPasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=100)
 
 
+class UserResetPinRequest(BaseModel):
+    new_pin: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
 # ============== Endpoints ==============
 
 @router.get("")
@@ -470,6 +474,58 @@ def reset_user_password(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "RESET_PASSWORD_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/{user_id}/reset-pin")
+def reset_user_pin(
+    user_id: int,
+    request: UserResetPinRequest,
+    auth: dict = Depends(verify_bearer_token),
+    _: None = Depends(require_permission("user.update")),
+):
+    """
+    Reset a user's PIN (admin action).
+    Requires: user.update permission
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "USER_NOT_FOUND", "message": "User tidak ditemukan"},
+            )
+
+        hashed_pin = hash_password(request.new_pin)
+        cursor.execute(
+            """
+            UPDATE users
+            SET pin = %s, has_pin = 1, failed_pin_attempts = 0, pin_locked_until = NULL, updated_at = %s
+            WHERE id = %s
+            """,
+            (hashed_pin, datetime.now(), user_id),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "PIN berhasil direset",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error resetting PIN: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "RESET_PIN_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

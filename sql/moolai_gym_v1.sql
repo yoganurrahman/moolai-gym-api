@@ -767,6 +767,9 @@ CREATE TABLE `transactions` (
   `promo_discount` decimal(12,2) DEFAULT 0.00 COMMENT 'Jumlah diskon dari promo',
   `voucher_code` varchar(50) DEFAULT NULL,
   `voucher_discount` decimal(12,2) DEFAULT 0.00 COMMENT 'Jumlah diskon dari voucher',
+  `payment_proof` varchar(500) DEFAULT NULL COMMENT 'Path bukti pembayaran',
+  `approved_by` int(11) DEFAULT NULL COMMENT 'Staff yang approve pembayaran',
+  `approved_at` datetime DEFAULT NULL,
   `notes` text DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
@@ -777,9 +780,11 @@ CREATE TABLE `transactions` (
   KEY `idx_transaction_date` (`created_at`),
   KEY `idx_transaction_status` (`payment_status`),
   KEY `transactions_ibfk_2` (`staff_id`),
+  KEY `transactions_ibfk_3` (`approved_by`),
   CONSTRAINT `transactions_branch_fk` FOREIGN KEY (`branch_id`) REFERENCES `branches` (`id`),
   CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
-  CONSTRAINT `transactions_ibfk_2` FOREIGN KEY (`staff_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+  CONSTRAINT `transactions_ibfk_2` FOREIGN KEY (`staff_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `transactions_ibfk_3` FOREIGN KEY (`approved_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=29 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------
