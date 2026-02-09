@@ -1329,7 +1329,9 @@ CREATE TABLE `transactions` (
   `paid_at` datetime DEFAULT NULL,
   -- Promo & Voucher
   `promo_id` int(11) DEFAULT NULL,
+  `promo_discount` decimal(12,2) DEFAULT 0 COMMENT 'Jumlah diskon dari promo',
   `voucher_code` varchar(50) DEFAULT NULL,
+  `voucher_discount` decimal(12,2) DEFAULT 0 COMMENT 'Jumlah diskon dari voucher',
   `notes` text DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
@@ -1546,7 +1548,6 @@ CREATE TABLE `subscription_invoices` (
 -- ----------------------------
 -- FUNGSI: Menyimpan promo/diskon yang berlaku otomatis
 -- RELASI:
---   - ONE-TO-MANY ke vouchers (promo_id) - voucher yang link ke promo ini
 --   - Referenced by transactions (promo_id)
 -- PROMO TYPES:
 --   - percentage: Diskon persentase
@@ -1597,7 +1598,6 @@ CREATE TABLE `promos` (
 -- ----------------------------
 -- FUNGSI: Menyimpan voucher code yang bisa diinput manual oleh customer
 -- RELASI:
---   - MANY-TO-ONE ke promos (promo_id) - link ke promo (opsional)
 --   - ONE-TO-MANY ke voucher_usages - tracking penggunaan voucher
 -- PERBEDAAN DENGAN PROMO:
 --   - Voucher harus diinput kode-nya
@@ -1608,13 +1608,13 @@ DROP TABLE IF EXISTS `vouchers`;
 CREATE TABLE `vouchers` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `code` varchar(50) NOT NULL,
-  `promo_id` int(11) DEFAULT NULL COMMENT 'Link ke promo jika ada',
   `voucher_type` enum('percentage','fixed','free_item') NOT NULL,
   `discount_value` decimal(12,2) DEFAULT 0,
   `min_purchase` decimal(12,2) DEFAULT 0,
   `max_discount` decimal(12,2) DEFAULT NULL,
   -- Applicable to
   `applicable_to` enum('all','membership','class','pt','product') NOT NULL DEFAULT 'all',
+  `applicable_items` json DEFAULT NULL COMMENT 'Specific item IDs',
   -- Period
   `start_date` datetime NOT NULL,
   `end_date` datetime NOT NULL,
@@ -1626,8 +1626,7 @@ CREATE TABLE `vouchers` (
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `code` (`code`),
-  CONSTRAINT `vouchers_ibfk_1` FOREIGN KEY (`promo_id`) REFERENCES `promos` (`id`) ON DELETE SET NULL
+  UNIQUE KEY `code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------
@@ -1656,6 +1655,35 @@ CREATE TABLE `voucher_usages` (
   CONSTRAINT `voucher_usages_ibfk_1` FOREIGN KEY (`voucher_id`) REFERENCES `vouchers` (`id`) ON DELETE CASCADE,
   CONSTRAINT `voucher_usages_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `voucher_usages_ibfk_3` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ----------------------------
+-- Table: discount_usages
+-- ----------------------------
+-- FUNGSI: Mencatat penggunaan promo & voucher secara terpadu
+-- RELASI:
+--   - discount_type + discount_id → referensi ke promos atau vouchers
+--   - MANY-TO-ONE ke users (user_id) - user yang menggunakan
+--   - MANY-TO-ONE ke transactions (transaction_id) - transaksi terkait
+-- USAGE:
+--   - Validasi per_user_limit untuk promo
+--   - Validasi is_single_use untuk voucher
+--   - Reporting penggunaan diskon
+-- ----------------------------
+DROP TABLE IF EXISTS `discount_usages`;
+CREATE TABLE `discount_usages` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `discount_type` enum('promo','voucher') NOT NULL COMMENT 'Jenis diskon',
+  `discount_id` int(11) NOT NULL COMMENT 'ID promo atau voucher',
+  `user_id` int(11) DEFAULT NULL,
+  `transaction_id` int(11) DEFAULT NULL,
+  `discount_amount` decimal(12,2) NOT NULL,
+  `used_at` datetime DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_discount_usage` (`discount_type`, `discount_id`, `user_id`),
+  KEY `idx_discount_transaction` (`transaction_id`),
+  CONSTRAINT `discount_usages_user_fk` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `discount_usages_transaction_fk` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ============================================================================
@@ -2007,14 +2035,38 @@ INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item
 INSERT INTO `member_memberships` (`id`, `user_id`, `package_id`, `transaction_id`, `membership_code`, `start_date`, `end_date`, `class_remaining`, `status`, `auto_renew`, `created_at`) VALUES
 (3, 8, 3, 5, 'MBR-20260110-AND001', '2026-01-10', '2026-02-09', NULL, 'active', 0, '2026-01-10 11:00:00');
 
--- Promo aktif - Diskon 20% untuk Class Pass
-INSERT INTO `promos` (`id`, `name`, `description`, `promo_type`, `discount_value`, `min_purchase`, `max_discount`, `applicable_to`, `start_date`, `end_date`, `usage_limit`, `usage_count`, `per_user_limit`, `is_active`, `created_at`) VALUES
-(1, 'Class Pass Promo', 'Diskon 20% untuk pembelian Class Pass', 'percentage', 20, 100000, 100000, 'class', '2026-01-01 00:00:00', '2026-01-31 23:59:59', 100, 1, 1, 1, '2026-01-01 00:00:00');
+-- ═══════════════════════ PROMOS ═══════════════════════
 
--- Voucher dengan kode
-INSERT INTO `vouchers` (`id`, `code`, `promo_id`, `voucher_type`, `discount_value`, `min_purchase`, `max_discount`, `applicable_to`, `start_date`, `end_date`, `usage_limit`, `usage_count`, `is_single_use`, `is_active`, `created_at`) VALUES
-(1, 'CLASSFIT20', 1, 'percentage', 20, 100000, 100000, 'class', '2026-01-01 00:00:00', '2026-01-31 23:59:59', 50, 1, 1, 1, '2026-01-01 00:00:00'),
-(2, 'NEWMEMBER50K', NULL, 'fixed', 50000, 200000, NULL, 'all', '2026-01-01 00:00:00', '2026-12-31 23:59:59', 100, 0, 1, 1, '2026-01-01 00:00:00');
+-- 1. Diskon 20% untuk Class Pass (sudah berjalan, Januari)
+-- 2. Diskon 15% membership untuk member baru
+-- 3. Diskon 10% semua produk (suplemen, minuman, dll)
+-- 4. Gratis 1 sesi PT untuk pembelian paket PT 10 sesi
+-- 5. Promo Valentine - diskon 25% semua layanan
+-- 6. Promo Ramadhan - diskon 30% membership (akan datang)
+-- 7. Promo expired (sudah lewat) untuk testing
+
+INSERT INTO `promos` (`id`, `name`, `description`, `promo_type`, `discount_value`, `min_purchase`, `max_discount`, `applicable_to`, `start_date`, `end_date`, `usage_limit`, `usage_count`, `per_user_limit`, `is_active`, `created_at`) VALUES
+(1, 'Class Pass Promo', 'Diskon 20% untuk pembelian Class Pass', 'percentage', 20, 100000, 100000, 'class', '2026-01-01 00:00:00', '2026-01-31 23:59:59', 100, 1, 1, 1, '2026-01-01 00:00:00'),
+(2, 'Welcome New Member', 'Diskon 15% untuk member baru yang membeli membership pertama', 'percentage', 15, 200000, 150000, 'membership', '2026-01-01 00:00:00', '2026-06-30 23:59:59', 200, 0, 1, 1, '2026-01-01 00:00:00'),
+(3, 'Promo Suplemen & Produk', 'Diskon 10% untuk semua produk di shop', 'percentage', 10, 50000, 50000, 'product', '2026-02-01 00:00:00', '2026-02-28 23:59:59', 150, 0, 2, 1, '2026-02-01 00:00:00'),
+(4, 'PT Bundling Bonus', 'Potongan Rp 500.000 untuk pembelian paket PT 10 sesi atau lebih', 'fixed', 500000, 2000000, NULL, 'pt', '2026-02-01 00:00:00', '2026-03-31 23:59:59', 50, 0, 1, 1, '2026-02-01 00:00:00'),
+(5, 'Valentine Fit Deal', 'Diskon 25% untuk semua layanan di Moolai Gym, spesial Valentine!', 'percentage', 25, 100000, 250000, 'all', '2026-02-10 00:00:00', '2026-02-16 23:59:59', 300, 0, 1, 1, '2026-02-10 00:00:00'),
+(6, 'Promo Ramadhan', 'Diskon 30% membership selama bulan Ramadhan', 'percentage', 30, 200000, 300000, 'membership', '2026-03-01 00:00:00', '2026-03-31 23:59:59', 500, 0, 1, 1, '2026-02-01 00:00:00'),
+(7, 'Promo Tahun Baru', 'Diskon 20% semua layanan untuk tahun baru', 'percentage', 20, 100000, 200000, 'all', '2025-12-25 00:00:00', '2025-12-31 23:59:59', 100, 45, 1, 0, '2025-12-20 00:00:00');
+
+-- ═══════════════════════ VOUCHERS ═══════════════════════
+
+INSERT INTO `vouchers` (`id`, `code`, `voucher_type`, `discount_value`, `min_purchase`, `max_discount`, `applicable_to`, `start_date`, `end_date`, `usage_limit`, `usage_count`, `is_single_use`, `is_active`, `created_at`) VALUES
+(1, 'CLASSFIT20', 'percentage', 20, 100000, 100000, 'class', '2026-01-01 00:00:00', '2026-01-31 23:59:59', 50, 1, 1, 1, '2026-01-01 00:00:00'),
+(2, 'NEWMEMBER50K', 'fixed', 50000, 200000, NULL, 'all', '2026-01-01 00:00:00', '2026-12-31 23:59:59', 100, 0, 1, 1, '2026-01-01 00:00:00'),
+(3, 'WELCOME15', 'percentage', 15, 200000, 150000, 'membership', '2026-01-01 00:00:00', '2026-06-30 23:59:59', 100, 0, 1, 1, '2026-01-01 00:00:00'),
+(4, 'SUPLEMEN10', 'percentage', 10, 50000, 50000, 'product', '2026-02-01 00:00:00', '2026-02-28 23:59:59', 80, 0, 0, 1, '2026-02-01 00:00:00'),
+(5, 'PTBONUS500K', 'fixed', 500000, 2000000, NULL, 'pt', '2026-02-01 00:00:00', '2026-03-31 23:59:59', 30, 0, 1, 1, '2026-02-01 00:00:00'),
+(6, 'VALENTINE25', 'percentage', 25, 100000, 250000, 'all', '2026-02-10 00:00:00', '2026-02-16 23:59:59', 200, 0, 1, 1, '2026-02-10 00:00:00'),
+(7, 'RAMADHAN30', 'percentage', 30, 200000, 300000, 'membership', '2026-03-01 00:00:00', '2026-03-31 23:59:59', 300, 0, 1, 1, '2026-02-01 00:00:00'),
+(8, 'REFERRAL25K', 'fixed', 25000, 100000, NULL, 'all', '2026-01-01 00:00:00', '2026-12-31 23:59:59', 500, 0, 1, 1, '2026-01-01 00:00:00'),
+(9, 'BIRTHDAY100K', 'fixed', 100000, 300000, NULL, 'all', '2026-01-01 00:00:00', '2026-12-31 23:59:59', 1000, 0, 1, 1, '2026-01-01 00:00:00'),
+(10, 'FLASHSALE50', 'percentage', 50, 500000, 500000, 'membership', '2026-02-14 00:00:00', '2026-02-14 23:59:59', 10, 0, 1, 1, '2026-02-10 00:00:00');
 
 -- Transaksi pembelian 10 Class Pass dengan voucher
 INSERT INTO `transactions` (`id`, `branch_id`, `transaction_code`, `user_id`, `staff_id`, `subtotal`, `discount_type`, `discount_value`, `discount_amount`, `subtotal_after_discount`, `tax_percentage`, `tax_amount`, `grand_total`, `payment_method`, `payment_status`, `paid_amount`, `voucher_code`, `paid_at`, `created_at`) VALUES

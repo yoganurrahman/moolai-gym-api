@@ -764,7 +764,9 @@ CREATE TABLE `transactions` (
   `change_amount` decimal(12,2) DEFAULT 0.00,
   `paid_at` datetime DEFAULT NULL,
   `promo_id` int(11) DEFAULT NULL,
+  `promo_discount` decimal(12,2) DEFAULT 0.00 COMMENT 'Jumlah diskon dari promo',
   `voucher_code` varchar(50) DEFAULT NULL,
+  `voucher_discount` decimal(12,2) DEFAULT 0.00 COMMENT 'Jumlah diskon dari voucher',
   `notes` text DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
@@ -837,18 +839,37 @@ CREATE TABLE `voucher_usages` (
 ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------
+-- Table structure for discount_usages
+-- ----------------------------
+DROP TABLE IF EXISTS `discount_usages`;
+CREATE TABLE `discount_usages` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `discount_type` enum('promo','voucher') NOT NULL COMMENT 'Jenis diskon',
+  `discount_id` int(11) NOT NULL COMMENT 'ID promo atau voucher',
+  `user_id` int(11) DEFAULT NULL,
+  `transaction_id` int(11) DEFAULT NULL,
+  `discount_amount` decimal(12,2) NOT NULL,
+  `used_at` datetime DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_discount_usage` (`discount_type`, `discount_id`, `user_id`),
+  KEY `idx_discount_transaction` (`transaction_id`),
+  CONSTRAINT `discount_usages_user_fk` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `discount_usages_transaction_fk` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ----------------------------
 -- Table structure for vouchers
 -- ----------------------------
 DROP TABLE IF EXISTS `vouchers`;
 CREATE TABLE `vouchers` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `code` varchar(50) NOT NULL,
-  `promo_id` int(11) DEFAULT NULL COMMENT 'Link ke promo jika ada',
   `voucher_type` enum('percentage','fixed','free_item') NOT NULL,
   `discount_value` decimal(12,2) DEFAULT 0.00,
   `min_purchase` decimal(12,2) DEFAULT 0.00,
   `max_discount` decimal(12,2) DEFAULT NULL,
   `applicable_to` enum('all','membership','class','pt','product') NOT NULL DEFAULT 'all',
+  `applicable_items` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL COMMENT 'Specific item IDs' CHECK (json_valid(`applicable_items`)),
   `start_date` datetime NOT NULL,
   `end_date` datetime NOT NULL,
   `usage_limit` int(11) DEFAULT 1,
@@ -858,9 +879,7 @@ CREATE TABLE `vouchers` (
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `code` (`code`),
-  KEY `vouchers_ibfk_1` (`promo_id`),
-  CONSTRAINT `vouchers_ibfk_1` FOREIGN KEY (`promo_id`) REFERENCES `promos` (`id`) ON DELETE SET NULL
+  UNIQUE KEY `code` (`code`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------

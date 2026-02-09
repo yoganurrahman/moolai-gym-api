@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 router = APIRouter(prefix="/api/member")
 
-from . import memberships, checkins, classes, pt, transactions, profile, products
+from . import memberships, checkins, classes, pt, transactions, profile, products, settings
 
 router.include_router(memberships.router)
 router.include_router(checkins.router)
@@ -11,3 +11,4 @@ router.include_router(pt.router)
 router.include_router(transactions.router)
 router.include_router(profile.router)
 router.include_router(products.router)
+router.include_router(settings.router)

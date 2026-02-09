@@ -816,45 +816,66 @@ def get_bookings_calendar(
         for d in date_summary:
             d["class_date"] = str(d["class_date"])
 
-        # Get schedules with their bookings for this date range
-        schedule_branch_filter = ""
+        # Get active recurring schedules and generate dates based on day_of_week
+        sched_branch_filter = ""
+        sched_params = []
         if branch_id:
-            schedule_branch_filter = " AND cs.branch_id = %s"
-            params_schedules.append(branch_id)
+            sched_branch_filter = " AND cs.branch_id = %s"
+            sched_params.append(branch_id)
 
         cursor.execute(
             f"""
-            SELECT DISTINCT cb.class_date, cs.id as schedule_id,
+            SELECT cs.id as schedule_id, cs.day_of_week,
                    ct.name as class_name, ct.color,
                    cs.start_time, cs.end_time, cs.room, cs.capacity,
-                   u.name as trainer_name,
-                   (SELECT COUNT(*) FROM class_bookings cb2
-                    WHERE cb2.schedule_id = cs.id AND cb2.class_date = cb.class_date
-                    AND cb2.status IN ('booked', 'attended')) as booked_count
-            FROM class_bookings cb
-            JOIN class_schedules cs ON cb.schedule_id = cs.id
+                   u.name as trainer_name
+            FROM class_schedules cs
             JOIN class_types ct ON cs.class_type_id = ct.id
             LEFT JOIN trainers t ON cs.trainer_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
-            WHERE cb.class_date BETWEEN %s AND %s
-            AND cb.status != 'cancelled'
-            {schedule_branch_filter}
-            GROUP BY cb.class_date, cs.id
-            ORDER BY cb.class_date, cs.start_time
+            WHERE cs.is_active = 1
+            {sched_branch_filter}
+            ORDER BY cs.day_of_week, cs.start_time
             """,
-            params_schedules,
+            sched_params,
         )
-        schedules_by_date_raw = cursor.fetchall()
+        active_schedules = cursor.fetchall()
 
+        # Generate schedules_by_date from recurring schedules within the date range
+        from datetime import timedelta
         schedules_by_date = {}
-        for s in schedules_by_date_raw:
-            d = str(s["class_date"])
-            s["class_date"] = d
-            s["start_time"] = str(s["start_time"])
-            s["end_time"] = str(s["end_time"])
-            if d not in schedules_by_date:
-                schedules_by_date[d] = []
-            schedules_by_date[d].append(s)
+        current = start_date
+        while current <= end_date:
+            # Convert Python weekday (0=Mon..6=Sun) to backend convention (0=Sun..6=Sat)
+            dow = (current.weekday() + 1) % 7
+            d_str = str(current)
+            for s in active_schedules:
+                if s["day_of_week"] == dow:
+                    if d_str not in schedules_by_date:
+                        schedules_by_date[d_str] = []
+                    # Get actual booking count for this schedule on this date
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) as cnt FROM class_bookings
+                        WHERE schedule_id = %s AND class_date = %s
+                        AND status IN ('booked', 'attended')
+                        """,
+                        [s["schedule_id"], current],
+                    )
+                    bc = cursor.fetchone()
+                    schedules_by_date[d_str].append({
+                        "class_date": d_str,
+                        "schedule_id": s["schedule_id"],
+                        "class_name": s["class_name"],
+                        "color": s["color"],
+                        "start_time": str(s["start_time"]),
+                        "end_time": str(s["end_time"]),
+                        "room": s["room"],
+                        "capacity": s["capacity"],
+                        "trainer_name": s["trainer_name"],
+                        "booked_count": bc["cnt"] if bc else 0,
+                    })
+            current += timedelta(days=1)
 
         return {
             "success": True,

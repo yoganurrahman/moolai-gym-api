@@ -38,6 +38,7 @@ class CheckoutRequest(BaseModel):
     discount_type: Optional[str] = Field(None, pattern=r"^(percentage|fixed)$")
     discount_value: Optional[float] = Field(None, ge=0)
     voucher_code: Optional[str] = None
+    promo_id: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -89,6 +90,48 @@ def get_item_details(cursor, item_type: str, item_id: int, branch_id: int = None
         return None
 
     return cursor.fetchone()
+
+
+# Mapping item_type di cart ke applicable_to di promo/voucher
+ITEM_TYPE_TO_APPLICABLE = {
+    "product": "product",
+    "rental": "product",
+    "membership": "membership",
+    "pt_package": "pt",
+    "class_pass": "class",
+}
+
+
+def filter_applicable_items(transaction_items, applicable_to, applicable_items_json):
+    """Filter transaction items yang sesuai dengan applicable_to dan applicable_items.
+    Returns list of matching items."""
+    import json
+
+    if applicable_to == "all" and not applicable_items_json:
+        return transaction_items
+
+    matched = []
+    applicable_item_ids = None
+    if applicable_items_json:
+        try:
+            applicable_item_ids = json.loads(applicable_items_json) if isinstance(applicable_items_json, str) else applicable_items_json
+        except (json.JSONDecodeError, TypeError):
+            applicable_item_ids = None
+
+    for item in transaction_items:
+        item_applicable = ITEM_TYPE_TO_APPLICABLE.get(item["item_type"], item["item_type"])
+
+        # Check applicable_to
+        if applicable_to != "all" and item_applicable != applicable_to:
+            continue
+
+        # Check applicable_items (specific IDs)
+        if applicable_item_ids and item["item_id"] not in applicable_item_ids:
+            continue
+
+        matched.append(item)
+
+    return matched
 
 
 # ============== Endpoints ==============
@@ -207,6 +250,71 @@ def checkout(
 
         subtotal_after_discount = subtotal - transaction_discount_amount
 
+        # Apply promo if provided
+        promo_discount = 0
+        if request.promo_id:
+            cursor.execute(
+                """
+                SELECT * FROM promos
+                WHERE id = %s AND is_active = 1
+                AND start_date <= NOW() AND end_date >= NOW()
+                AND (usage_limit IS NULL OR usage_count < usage_limit)
+                """,
+                (request.promo_id,),
+            )
+            promo = cursor.fetchone()
+
+            if promo:
+                # Check per_user_limit
+                per_user_limit = promo.get("per_user_limit") or 0
+                if per_user_limit > 0 and buyer_user_id:
+                    cursor.execute(
+                        "SELECT COUNT(*) as cnt FROM discount_usages WHERE discount_type = 'promo' AND discount_id = %s AND user_id = %s",
+                        (promo["id"], buyer_user_id),
+                    )
+                    user_usage = cursor.fetchone()["cnt"]
+                    if user_usage >= per_user_limit:
+                        promo = None  # User sudah melebihi batas
+
+            if promo:
+                # Check applicable_to & applicable_items
+                promo_applicable = promo.get("applicable_to") or "all"
+                matched_items = filter_applicable_items(
+                    transaction_items, promo_applicable, promo.get("applicable_items")
+                )
+
+                if not matched_items and promo_applicable != "all":
+                    pass  # No matching items, skip promo
+                else:
+                    # Calculate subtotal of matched items only (for applicable filtering)
+                    if promo_applicable != "all" or promo.get("applicable_items"):
+                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
+                    else:
+                        applicable_subtotal = subtotal_after_discount
+
+                    # Check min purchase
+                    min_purchase = float(promo.get("min_purchase") or 0)
+                    if min_purchase <= 0 or applicable_subtotal >= min_purchase:
+                        if promo["promo_type"] == "percentage":
+                            promo_discount = applicable_subtotal * (float(promo["discount_value"]) / 100)
+                            if promo.get("max_discount"):
+                                promo_discount = min(promo_discount, float(promo["max_discount"]))
+                        elif promo["promo_type"] == "fixed":
+                            promo_discount = min(float(promo["discount_value"]), applicable_subtotal)
+                        elif promo["promo_type"] == "free_item":
+                            # Gratiskan 1 qty item termurah dari matched items
+                            cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                            promo_discount = min(cheapest_price, applicable_subtotal)
+
+                        promo_discount = min(promo_discount, subtotal_after_discount)
+                        subtotal_after_discount -= promo_discount
+
+                        # Update promo usage
+                        cursor.execute(
+                            "UPDATE promos SET usage_count = IFNULL(usage_count, 0) + 1 WHERE id = %s",
+                            (promo["id"],),
+                        )
+
         # Apply voucher if provided
         voucher_discount = 0
         if request.voucher_code:
@@ -222,20 +330,48 @@ def checkout(
             voucher = cursor.fetchone()
 
             if voucher:
-                if voucher["voucher_type"] == "percentage":
-                    voucher_discount = subtotal_after_discount * (float(voucher["discount_value"]) / 100)
-                    if voucher["max_discount"]:
-                        voucher_discount = min(voucher_discount, float(voucher["max_discount"]))
-                else:
-                    voucher_discount = min(float(voucher["discount_value"]), subtotal_after_discount)
+                # Check is_single_use (sekali pakai per user)
+                if voucher.get("is_single_use") and buyer_user_id:
+                    cursor.execute(
+                        "SELECT COUNT(*) as cnt FROM discount_usages WHERE discount_type = 'voucher' AND discount_id = %s AND user_id = %s",
+                        (voucher["id"], buyer_user_id),
+                    )
+                    if cursor.fetchone()["cnt"] > 0:
+                        voucher = None  # User sudah pernah pakai
 
-                subtotal_after_discount -= voucher_discount
-
-                # Update voucher usage
-                cursor.execute(
-                    "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
-                    (voucher["id"],),
+            if voucher:
+                # Check applicable_to & applicable_items
+                voucher_applicable = voucher.get("applicable_to") or "all"
+                matched_items = filter_applicable_items(
+                    transaction_items, voucher_applicable, voucher.get("applicable_items")
                 )
+
+                if not matched_items and voucher_applicable != "all":
+                    pass  # No matching items, skip voucher
+                else:
+                    if voucher_applicable != "all" or voucher.get("applicable_items"):
+                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
+                    else:
+                        applicable_subtotal = subtotal_after_discount
+
+                    if voucher["voucher_type"] == "percentage":
+                        voucher_discount = applicable_subtotal * (float(voucher["discount_value"]) / 100)
+                        if voucher["max_discount"]:
+                            voucher_discount = min(voucher_discount, float(voucher["max_discount"]))
+                    elif voucher["voucher_type"] == "free_item":
+                        cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                        voucher_discount = min(cheapest_price, applicable_subtotal)
+                    else:
+                        voucher_discount = min(float(voucher["discount_value"]), applicable_subtotal)
+
+                    voucher_discount = min(voucher_discount, subtotal_after_discount)
+                    subtotal_after_discount -= voucher_discount
+
+                    # Update voucher usage
+                    cursor.execute(
+                        "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
+                        (voucher["id"],),
+                    )
 
         # Calculate tax and service charge
         tax_amount = subtotal_after_discount * (tax_percentage / 100) if tax_enabled else 0
@@ -251,8 +387,9 @@ def checkout(
             (transaction_code, branch_id, user_id, staff_id, customer_name, customer_phone, customer_email,
              subtotal, discount_type, discount_value, discount_amount, subtotal_after_discount,
              tax_percentage, tax_amount, service_charge_percentage, service_charge_amount,
-             grand_total, payment_method, payment_status, paid_amount, paid_at, voucher_code, notes, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             grand_total, payment_method, payment_status, paid_amount, paid_at,
+             promo_id, promo_discount, voucher_code, voucher_discount, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 transaction_code,
@@ -265,7 +402,7 @@ def checkout(
                 subtotal,
                 request.discount_type,
                 request.discount_value or 0,
-                transaction_discount_amount + voucher_discount,
+                transaction_discount_amount + promo_discount + voucher_discount,
                 subtotal_after_discount,
                 tax_percentage if tax_enabled else 0,
                 tax_amount,
@@ -276,7 +413,10 @@ def checkout(
                 "paid",
                 grand_total,
                 datetime.now(),
+                request.promo_id,
+                promo_discount,
                 request.voucher_code,
+                voucher_discount,
                 request.notes,
                 datetime.now(),
             ),
@@ -437,6 +577,30 @@ def checkout(
                     ),
                 )
 
+        # Record discount usages
+        if promo_discount > 0 and request.promo_id:
+            cursor.execute(
+                """
+                INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
+                VALUES ('promo', %s, %s, %s, %s, %s)
+                """,
+                (request.promo_id, buyer_user_id, transaction_id, promo_discount, datetime.now()),
+            )
+        if voucher_discount > 0 and request.voucher_code:
+            cursor.execute(
+                "SELECT id FROM vouchers WHERE code = %s",
+                (request.voucher_code,),
+            )
+            voucher_row = cursor.fetchone()
+            if voucher_row:
+                cursor.execute(
+                    """
+                    INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
+                    VALUES ('voucher', %s, %s, %s, %s, %s)
+                    """,
+                    (voucher_row["id"], buyer_user_id, transaction_id, voucher_discount, datetime.now()),
+                )
+
         conn.commit()
 
         return {
@@ -446,7 +610,9 @@ def checkout(
                 "transaction_id": transaction_id,
                 "transaction_code": transaction_code,
                 "subtotal": subtotal,
-                "discount_amount": transaction_discount_amount + voucher_discount,
+                "discount_amount": transaction_discount_amount + promo_discount + voucher_discount,
+                "promo_discount": promo_discount,
+                "voucher_discount": voucher_discount,
                 "tax_amount": tax_amount,
                 "service_charge_amount": service_charge_amount,
                 "grand_total": grand_total,
@@ -557,9 +723,11 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
         # Get transaction
         cursor.execute(
             """
-            SELECT t.*, b.name as branch_name, b.code as branch_code
+            SELECT t.*, b.name as branch_name, b.code as branch_code,
+                   p.name as promo_name, p.promo_type, p.discount_value as promo_discount_value
             FROM transactions t
             LEFT JOIN branches b ON t.branch_id = b.id
+            LEFT JOIN promos p ON t.promo_id = p.id
             WHERE t.id = %s
             """,
             (transaction_id,),
@@ -592,7 +760,7 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
             transaction["member"] = cursor.fetchone()
 
         # Format decimals
-        for key in ["subtotal", "discount_amount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount"]:
+        for key in ["subtotal", "discount_amount", "promo_discount", "voucher_discount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount", "promo_discount_value"]:
             if transaction.get(key):
                 transaction[key] = float(transaction[key])
 
@@ -695,11 +863,13 @@ def get_all_transactions(
             f"""
             SELECT t.*, u.name as member_name, u.email as member_email,
                    s.name as staff_name,
-                   b.name as branch_name, b.code as branch_code
+                   b.name as branch_name, b.code as branch_code,
+                   p.name as promo_name
             FROM transactions t
             LEFT JOIN users u ON t.user_id = u.id
             LEFT JOIN users s ON t.staff_id = s.id
             LEFT JOIN branches b ON t.branch_id = b.id
+            LEFT JOIN promos p ON t.promo_id = p.id
             {where_sql}
             ORDER BY t.created_at DESC
             LIMIT %s OFFSET %s

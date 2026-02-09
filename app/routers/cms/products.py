@@ -132,6 +132,54 @@ def create_category(request: CategoryCreate, auth: dict = Depends(verify_bearer_
         conn.close()
 
 
+@router.delete("/categories/{category_id}")
+def delete_category(category_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Delete a product category"""
+    check_permission(auth, "product.delete")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Check if category has products
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM products WHERE category_id = %s AND is_active = 1",
+            (category_id,),
+        )
+        result = cursor.fetchone()
+        if result and result["count"] > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CATEGORY_HAS_PRODUCTS",
+                    "message": f"Kategori masih memiliki {result['count']} produk aktif",
+                },
+            )
+
+        cursor.execute("DELETE FROM product_categories WHERE id = %s", (category_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "CATEGORY_NOT_FOUND", "message": "Kategori tidak ditemukan"},
+            )
+        conn.commit()
+
+        return {"success": True, "message": "Kategori berhasil dihapus"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error deleting category: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "DELETE_CATEGORY_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # ============== Product Endpoints ==============
 
 @router.get("")
@@ -204,10 +252,15 @@ def get_products(
 
         # Get data
         offset = (page - 1) * limit
+        image_select = """, (
+            SELECT img.file_path FROM images img
+            WHERE img.category = 'product' AND img.reference_id = p.id AND img.is_active = 1
+            ORDER BY img.sort_order ASC LIMIT 1
+        ) AS image_url"""
         data_params = ([branch_id] + params + [limit, offset]) if branch_id else (params + [limit, offset])
         cursor.execute(
             f"""
-            SELECT p.*, pc.name as category_name{branch_select}
+            SELECT p.*, pc.name as category_name{branch_select}{image_select}
             FROM products p
             LEFT JOIN product_categories pc ON p.category_id = pc.id
             {branch_join}
