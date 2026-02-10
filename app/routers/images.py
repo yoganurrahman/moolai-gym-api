@@ -27,7 +27,7 @@ MAX_FILE_SIZE = int(os.getenv("MAX_IMAGE_SIZE", 5 * 1024 * 1024))  # 5MB default
 VALID_CATEGORIES = [
     "splash_screen", "onboarding", "banner", "banner_member",
     "banner_class", "banner_pt", "banner_product", "pop_promo",
-    "product", "class", "pt", "content", "login", "other"
+    "product", "class", "pt", "branch", "content", "login", "other"
 ]
 
 VALID_PLATFORMS = ["all", "mobile", "web", "cms"]

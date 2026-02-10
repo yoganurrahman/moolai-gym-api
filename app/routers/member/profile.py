@@ -227,6 +227,54 @@ def set_default_branch(request: SetDefaultBranchRequest, auth: dict = Depends(ve
         conn.close()
 
 
+@router.get("/branches")
+def get_branches(auth: dict = Depends(verify_bearer_token)):
+    """Get all active branches with detail and crowd level for member branch selection"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT b.id, b.code, b.name, b.address, b.city, b.phone,
+                   b.opening_time, b.closing_time, b.capacity,
+                   COALESCE(ci.currently_in, 0) as currently_in
+            FROM branches b
+            LEFT JOIN (
+                SELECT branch_id, COUNT(*) as currently_in
+                FROM member_checkins
+                WHERE checkout_time IS NULL
+                GROUP BY branch_id
+            ) ci ON ci.branch_id = b.id
+            WHERE b.is_active = 1
+            ORDER BY b.sort_order ASC, b.name ASC
+            """
+        )
+        branches = cursor.fetchall()
+
+        for b in branches:
+            if b.get("opening_time"):
+                b["opening_time"] = str(b["opening_time"])
+            if b.get("closing_time"):
+                b["closing_time"] = str(b["closing_time"])
+            # Calculate crowd percentage
+            capacity = b.get("capacity") or 50
+            currently_in = b.get("currently_in") or 0
+            b["crowd_percent"] = min(round(currently_in / capacity * 100), 100) if capacity > 0 else 0
+
+        return {"success": True, "data": branches}
+
+    except Exception as e:
+        logger.error(f"Error getting branches: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_BRANCHES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.get("/qr-code")
 def get_my_qr_code(auth: dict = Depends(verify_bearer_token)):
     """Get member's QR code data for check-in"""

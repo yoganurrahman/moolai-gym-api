@@ -116,6 +116,7 @@ CREATE TABLE `branches` (
   `timezone` varchar(50) DEFAULT 'Asia/Jakarta',
   `opening_time` time DEFAULT '06:00:00',
   `closing_time` time DEFAULT '22:00:00',
+  `capacity` int(11) DEFAULT 50 COMMENT 'Kapasitas maksimal member di gym',
   `is_active` tinyint(1) DEFAULT 1,
   `sort_order` int(11) DEFAULT 0,
   `created_at` datetime DEFAULT current_timestamp(),

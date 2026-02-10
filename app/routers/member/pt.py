@@ -181,7 +181,7 @@ def get_available_trainers(
         order_by = "total_bookings DESC, u.name ASC" if include_stats else "u.name ASC"
         cursor.execute(
             f"""
-            SELECT t.id, t.specialization, t.bio,
+            SELECT t.id, t.specialization, t.bio, t.certifications,
                    u.name, u.email, u.phone, u.avatar as profile_photo,
                    (SELECT file_path FROM images
                     WHERE category = 'pt'
@@ -196,13 +196,17 @@ def get_available_trainers(
                    ON pb.trainer_id = t.id
                    AND pb.status IN ('booked', 'completed')
             WHERE {where_clause}
-            GROUP BY t.id, t.specialization, t.bio, u.name, u.email, u.phone, u.avatar
+            GROUP BY t.id, t.specialization, t.bio, t.certifications, u.name, u.email, u.phone, u.avatar
             ORDER BY {order_by}
             LIMIT %s
             """,
             params + [limit],
         )
         trainers = cursor.fetchall()
+
+        for t in trainers:
+            if t.get("certifications"):
+                t["certifications"] = json.loads(t["certifications"]) if isinstance(t["certifications"], str) else t["certifications"]
 
         return {
             "success": True,

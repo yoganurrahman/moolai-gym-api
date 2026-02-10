@@ -29,6 +29,7 @@ class BranchCreate(BaseModel):
     timezone: str = "Asia/Jakarta"
     opening_time: str = "06:00:00"
     closing_time: str = "22:00:00"
+    capacity: int = 50
     sort_order: int = 0
 
 
@@ -43,6 +44,7 @@ class BranchUpdate(BaseModel):
     timezone: Optional[str] = None
     opening_time: Optional[str] = None
     closing_time: Optional[str] = None
+    capacity: Optional[int] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -176,8 +178,8 @@ def create_branch(
         cursor.execute(
             """
             INSERT INTO branches (code, name, address, city, province, phone, email,
-                                  timezone, opening_time, closing_time, sort_order)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  timezone, opening_time, closing_time, capacity, sort_order)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.code.upper(),
@@ -190,6 +192,7 @@ def create_branch(
                 request.timezone,
                 request.opening_time,
                 request.closing_time,
+                request.capacity,
                 request.sort_order,
             ),
         )
@@ -252,7 +255,7 @@ def update_branch(
             update_fields.append("code = %s")
             params.append(request.code.upper())
 
-        for field in ["name", "address", "city", "province", "phone", "email", "timezone", "opening_time", "closing_time", "sort_order"]:
+        for field in ["name", "address", "city", "province", "phone", "email", "timezone", "opening_time", "closing_time", "capacity", "sort_order"]:
             value = getattr(request, field, None)
             if value is not None:
                 update_fields.append(f"{field} = %s")
