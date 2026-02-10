@@ -204,6 +204,93 @@ def get_products(
         conn.close()
 
 
+@router.get("/{product_id}")
+def get_product_detail(
+    product_id: int,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: Optional[int] = Depends(get_branch_id),
+):
+    """Get single product detail with all images"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Build branch JOIN clause
+        branch_join = ""
+        branch_select = ""
+        params = [product_id]
+        if branch_id:
+            branch_join = " LEFT JOIN branch_product_stock bps ON p.id = bps.product_id AND bps.branch_id = %s"
+            branch_select = ", bps.stock AS branch_stock"
+            params = [branch_id, product_id]
+
+        cursor.execute(
+            f"""
+            SELECT p.id, p.name, p.description, p.price, p.sku,
+                   COALESCE(
+                       (SELECT file_path FROM images
+                        WHERE category = 'product' AND reference_id = p.id AND is_active = 1
+                        ORDER BY sort_order ASC, id ASC LIMIT 1),
+                       p.image
+                   ) as image,
+                   p.is_rental, p.rental_duration,
+                   pc.id as category_id, pc.name as category_name{branch_select}
+            FROM products p
+            LEFT JOIN product_categories pc ON p.category_id = pc.id
+            {branch_join}
+            WHERE p.id = %s AND p.is_active = 1
+            """,
+            params,
+        )
+        product = cursor.fetchone()
+
+        if not product:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PRODUCT_NOT_FOUND", "message": "Produk tidak ditemukan"},
+            )
+
+        product["price"] = float(product["price"]) if product.get("price") else 0
+        product["is_rental"] = bool(product.get("is_rental"))
+        if branch_id:
+            b_stock = product.pop("branch_stock", None)
+            product["branch_stock"] = b_stock if b_stock is not None else 0
+        else:
+            product["branch_stock"] = 0
+
+        # Get all images
+        cursor.execute(
+            """
+            SELECT id, file_path, title, sort_order
+            FROM images
+            WHERE category = 'product' AND reference_id = %s AND is_active = 1
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (product_id,),
+        )
+        images = cursor.fetchall()
+
+        return {
+            "success": True,
+            "data": {
+                "product": product,
+                "images": images,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting product detail: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_PRODUCT_DETAIL_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/purchase")
 def purchase_products(
     request: PurchaseProductsRequest,
