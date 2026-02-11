@@ -589,6 +589,51 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
         # If there's a cancelled booking, we'll reactivate it instead of creating new
         reactivate_booking_id = existing_booking["id"] if existing_booking else None
 
+        # Check time overlap with other class bookings on the same date
+        new_start = schedule["start_time"]
+        new_end = schedule["end_time"]
+        cursor.execute(
+            """
+            SELECT cb.id, cs.start_time, cs.end_time, ct.name as class_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cb.user_id = %s AND cb.class_date = %s AND cb.status != 'cancelled'
+              AND cb.schedule_id != %s
+              AND cs.start_time < %s AND cs.end_time > %s
+            """,
+            (user_id, request.class_date, request.schedule_id, new_end, new_start),
+        )
+        overlap = cursor.fetchone()
+        if overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CLASS_TIME_CONFLICT",
+                    "message": f"Kamu sudah memiliki kelas '{overlap['class_name']}' pada waktu tersebut",
+                },
+            )
+
+        # Check time overlap with PT bookings on the same date
+        cursor.execute(
+            """
+            SELECT pb.id, pb.start_time, pb.end_time
+            FROM pt_bookings pb
+            WHERE pb.user_id = %s AND pb.booking_date = %s AND pb.status IN ('booked', 'completed')
+              AND pb.start_time < %s AND pb.end_time > %s
+            """,
+            (user_id, request.class_date, new_end, new_start),
+        )
+        pt_overlap = cursor.fetchone()
+        if pt_overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "PT_TIME_CONFLICT",
+                    "message": "Kamu sudah memiliki sesi PT pada waktu tersebut",
+                },
+            )
+
         # Check capacity
         cursor.execute(
             """

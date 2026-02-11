@@ -389,6 +389,43 @@ def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_bra
                 detail={"error_code": "SLOT_TAKEN", "message": "Slot sudah dibooking"},
             )
 
+        # Check member availability (no overlapping bookings for same member)
+        cursor.execute(
+            """
+            SELECT id FROM pt_bookings
+            WHERE user_id = %s AND booking_date = %s AND status IN ('booked', 'completed')
+            AND ((start_time <= %s AND end_time > %s) OR (start_time < %s AND end_time >= %s))
+            """,
+            (user_id, request.booking_date, request.start_time, request.start_time, end_time, end_time),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "MEMBER_BUSY", "message": "Kamu sudah memiliki booking PT pada waktu tersebut"},
+            )
+
+        # Check member availability against class bookings
+        cursor.execute(
+            """
+            SELECT cb.id, ct.name as class_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cb.user_id = %s AND cb.class_date = %s AND cb.status != 'cancelled'
+              AND cs.start_time < %s AND cs.end_time > %s
+            """,
+            (user_id, request.booking_date, end_time, request.start_time),
+        )
+        class_overlap = cursor.fetchone()
+        if class_overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CLASS_TIME_CONFLICT",
+                    "message": f"Kamu sudah memiliki kelas '{class_overlap['class_name']}' pada waktu tersebut",
+                },
+            )
+
         # Create booking
         cursor.execute(
             """

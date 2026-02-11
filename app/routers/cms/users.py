@@ -21,6 +21,7 @@ class UserCreateRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
     phone: Optional[str] = Field(None, max_length=20)
+    pin: Optional[str] = Field(None, min_length=6, max_length=6, pattern=r"^\d{6}$")
     role_id: int
     default_branch_id: Optional[int] = None
     is_active: bool = True
@@ -274,17 +275,22 @@ def create_user(
         # Hash password
         hashed_password = hash_password(request.password)
 
+        # Hash PIN if provided
+        hashed_pin = hash_password(request.pin) if request.pin else None
+
         # Insert user
         cursor.execute(
             """
-            INSERT INTO users (name, email, password, phone, role_id, default_branch_id, is_active, token_version, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO users (name, email, password, phone, pin, has_pin, role_id, default_branch_id, is_active, token_version, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.name,
                 request.email,
                 hashed_password,
                 request.phone,
+                hashed_pin,
+                1 if hashed_pin else 0,
                 request.role_id,
                 request.default_branch_id,
                 1 if request.is_active else 0,

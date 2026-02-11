@@ -366,6 +366,53 @@ def book_pt_session(
                 detail={"error_code": "TRAINER_BUSY", "message": "Trainer tidak tersedia pada waktu tersebut"},
             )
 
+        # Check member availability (no overlapping bookings for same member)
+        cursor.execute(
+            """
+            SELECT id FROM pt_bookings
+            WHERE user_id = %s AND booking_date = %s
+            AND status IN ('booked', 'completed')
+            AND (
+                (start_time <= %s AND end_time > %s)
+                OR (start_time < %s AND end_time >= %s)
+                OR (start_time >= %s AND end_time <= %s)
+            )
+            """,
+            (
+                user_id, request.booking_date,
+                start_time, start_time,
+                end_time, end_time,
+                start_time, end_time,
+            ),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "MEMBER_BUSY", "message": "Member sudah memiliki booking PT pada waktu tersebut"},
+            )
+
+        # Check member availability against class bookings
+        cursor.execute(
+            """
+            SELECT cb.id, ct.name as class_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cb.user_id = %s AND cb.class_date = %s AND cb.status != 'cancelled'
+              AND cs.start_time < %s AND cs.end_time > %s
+            """,
+            (user_id, request.booking_date, end_time, start_time),
+        )
+        class_overlap = cursor.fetchone()
+        if class_overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CLASS_TIME_CONFLICT",
+                    "message": f"Member sudah memiliki kelas '{class_overlap['class_name']}' pada waktu tersebut",
+                },
+            )
+
         # Create booking
         cursor.execute(
             """
@@ -406,6 +453,12 @@ def book_pt_session(
     except Exception as e:
         conn.rollback()
         logger.error(f"Error booking PT: {e}", exc_info=True)
+        err_str = str(e)
+        if "1062" in err_str or "Duplicate entry" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "MEMBER_BUSY", "message": "Anda sudah memiliki booking PT pada waktu tersebut"},
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "BOOK_PT_FAILED", "message": str(e)},
@@ -753,6 +806,78 @@ def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_toke
         conn.close()
 
 
+@router.post("/bookings/{booking_id}/no-show")
+def no_show_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Mark PT booking as no-show (CMS/Trainer)"""
+    check_permission(auth, "trainer.update")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            "SELECT * FROM pt_bookings WHERE id = %s AND status = 'booked'",
+            (booking_id,),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        cursor.execute(
+            """
+            UPDATE pt_bookings
+            SET status = 'no_show', updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), booking_id),
+        )
+
+        # No-show still counts as a used session
+        cursor.execute(
+            """
+            UPDATE member_pt_sessions
+            SET used_sessions = used_sessions + 1, updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), booking["member_pt_session_id"]),
+        )
+
+        cursor.execute(
+            "SELECT remaining_sessions FROM member_pt_sessions WHERE id = %s",
+            (booking["member_pt_session_id"],),
+        )
+        pt_session = cursor.fetchone()
+        if pt_session and pt_session["remaining_sessions"] <= 0:
+            cursor.execute(
+                "UPDATE member_pt_sessions SET status = 'completed' WHERE id = %s",
+                (booking["member_pt_session_id"],),
+            )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Booking PT ditandai no-show",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error marking PT booking no-show: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "NO_SHOW_PT_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # ============== Book PT for Member (CMS) ==============
 
 @router.post("/book-for-member", status_code=status.HTTP_201_CREATED)
@@ -852,6 +977,53 @@ def book_pt_for_member(
                 detail={"error_code": "TRAINER_BUSY", "message": "Trainer tidak tersedia pada waktu tersebut"},
             )
 
+        # Check member availability (no overlapping bookings for same member)
+        cursor.execute(
+            """
+            SELECT id FROM pt_bookings
+            WHERE user_id = %s AND booking_date = %s
+            AND status IN ('booked', 'completed')
+            AND (
+                (start_time <= %s AND end_time > %s)
+                OR (start_time < %s AND end_time >= %s)
+                OR (start_time >= %s AND end_time <= %s)
+            )
+            """,
+            (
+                request.user_id, request.booking_date,
+                start_time, start_time,
+                end_time, end_time,
+                start_time, end_time,
+            ),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "MEMBER_BUSY", "message": "Member sudah memiliki booking PT pada waktu tersebut"},
+            )
+
+        # Check member availability against class bookings
+        cursor.execute(
+            """
+            SELECT cb.id, ct.name as class_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cb.user_id = %s AND cb.class_date = %s AND cb.status != 'cancelled'
+              AND cs.start_time < %s AND cs.end_time > %s
+            """,
+            (request.user_id, request.booking_date, end_time, start_time),
+        )
+        class_overlap = cursor.fetchone()
+        if class_overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CLASS_TIME_CONFLICT",
+                    "message": f"Member sudah memiliki kelas '{class_overlap['class_name']}' pada waktu tersebut",
+                },
+            )
+
         # Create booking
         cursor.execute(
             """
@@ -893,6 +1065,12 @@ def book_pt_for_member(
     except Exception as e:
         conn.rollback()
         logger.error(f"Error booking PT for member: {e}", exc_info=True)
+        err_str = str(e)
+        if "1062" in err_str or "Duplicate entry" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "MEMBER_BUSY", "message": "Member sudah memiliki booking PT pada waktu tersebut"},
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "BOOK_PT_FOR_MEMBER_FAILED", "message": str(e)},

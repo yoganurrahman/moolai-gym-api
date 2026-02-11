@@ -1383,18 +1383,66 @@ def book_class_for_member(
                 detail={"error_code": "INVALID_DATE", "message": "Tanggal tidak sesuai dengan jadwal kelas"},
             )
 
-        # Check if already booked
+        # Check if already booked (including cancelled - for re-booking)
         cursor.execute(
             """
-            SELECT id FROM class_bookings
-            WHERE user_id = %s AND schedule_id = %s AND class_date = %s AND status != 'cancelled'
+            SELECT id, status FROM class_bookings
+            WHERE user_id = %s AND schedule_id = %s AND class_date = %s
             """,
             (request.user_id, request.schedule_id, request.class_date),
         )
-        if cursor.fetchone():
+        existing_booking = cursor.fetchone()
+        if existing_booking and existing_booking["status"] != 'cancelled':
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error_code": "ALREADY_BOOKED", "message": "Member sudah booking kelas ini"},
+            )
+        # Flag for re-booking: if cancelled booking exists, we'll UPDATE instead of INSERT
+        rebooking_id = existing_booking["id"] if existing_booking and existing_booking["status"] == 'cancelled' else None
+
+        # Check time overlap with other class bookings on the same date
+        new_start = schedule["start_time"]
+        new_end = schedule["end_time"]
+        cursor.execute(
+            """
+            SELECT cb.id, cs.start_time, cs.end_time, ct.name as class_name
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN class_types ct ON cs.class_type_id = ct.id
+            WHERE cb.user_id = %s AND cb.class_date = %s AND cb.status != 'cancelled'
+              AND cb.schedule_id != %s
+              AND cs.start_time < %s AND cs.end_time > %s
+            """,
+            (request.user_id, request.class_date, request.schedule_id, new_end, new_start),
+        )
+        overlap = cursor.fetchone()
+        if overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "CLASS_TIME_CONFLICT",
+                    "message": f"Member sudah memiliki kelas '{overlap['class_name']}' pada waktu tersebut",
+                },
+            )
+
+        # Check time overlap with PT bookings on the same date
+        cursor.execute(
+            """
+            SELECT pb.id, pb.start_time, pb.end_time
+            FROM pt_bookings pb
+            WHERE pb.user_id = %s AND pb.booking_date = %s AND pb.status IN ('booked', 'completed')
+              AND pb.start_time < %s AND pb.end_time > %s
+            """,
+            (request.user_id, request.class_date, new_end, new_start),
+        )
+        pt_overlap = cursor.fetchone()
+        if pt_overlap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "PT_TIME_CONFLICT",
+                    "message": "Member sudah memiliki sesi PT pada waktu tersebut",
+                },
             )
 
         # Check capacity
@@ -1469,21 +1517,37 @@ def book_class_for_member(
                     },
                 )
 
-        # Create booking
-        cursor.execute(
-            """
-            INSERT INTO class_bookings
-            (branch_id, user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
-             status, booked_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                schedule["branch_id"], request.user_id, request.schedule_id, request.class_date,
-                access_type, booking_membership_id, booking_class_pass_id,
-                "booked", datetime.now(), datetime.now(),
-            ),
-        )
-        booking_id = cursor.lastrowid
+        # Create or re-activate booking
+        if rebooking_id:
+            # Re-booking: update cancelled booking back to booked
+            cursor.execute(
+                """
+                UPDATE class_bookings
+                SET status = 'booked', access_type = %s, membership_id = %s, class_pass_id = %s,
+                    booked_at = %s, cancelled_at = NULL, attended_at = NULL, updated_at = %s
+                WHERE id = %s
+                """,
+                (
+                    access_type, booking_membership_id, booking_class_pass_id,
+                    datetime.now(), datetime.now(), rebooking_id,
+                ),
+            )
+            booking_id = rebooking_id
+        else:
+            cursor.execute(
+                """
+                INSERT INTO class_bookings
+                (branch_id, user_id, schedule_id, class_date, access_type, membership_id, class_pass_id,
+                 status, booked_at, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    schedule["branch_id"], request.user_id, request.schedule_id, request.class_date,
+                    access_type, booking_membership_id, booking_class_pass_id,
+                    "booked", datetime.now(), datetime.now(),
+                ),
+            )
+            booking_id = cursor.lastrowid
         conn.commit()
 
         return {
@@ -1505,6 +1569,13 @@ def book_class_for_member(
     except Exception as e:
         conn.rollback()
         logger.error(f"Error booking class for member: {e}", exc_info=True)
+        # Handle MySQL duplicate entry error gracefully
+        err_str = str(e)
+        if "1062" in err_str or "Duplicate entry" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "ALREADY_BOOKED", "message": "Member sudah booking kelas ini"},
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "BOOK_CLASS_FAILED", "message": str(e)},
