@@ -67,6 +67,7 @@ class VerifyRegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     password: str = Field(..., min_length=8, max_length=100)
     phone: Optional[str] = Field(None, max_length=20)
+    default_branch_id: Optional[int] = None
 
 
 # ============== Endpoints ==============
@@ -193,8 +194,8 @@ def verify_registration(request: VerifyRegisterRequest):
         # Insert user
         cursor.execute(
             """
-            INSERT INTO users (name, email, password, phone, role_id, is_active, token_version, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO users (name, email, password, phone, role_id, default_branch_id, is_active, token_version, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.name,
@@ -202,6 +203,7 @@ def verify_registration(request: VerifyRegisterRequest):
                 hashed_password,
                 request.phone,
                 role_id,
+                request.default_branch_id,
                 1,  # is_active
                 1,  # token_version
                 datetime.now(),
@@ -536,6 +538,50 @@ def change_password(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "CHANGE_PASSWORD_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ============== Public Branches ==============
+
+@router.get("/branches")
+def get_public_branches():
+    """
+    Get all active branches (public, no auth required).
+    Used for registration branch selection.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            SELECT b.id, b.code, b.name, b.city,
+                   (SELECT i.file_path FROM images i
+                    WHERE i.category = 'branch'
+                      AND i.reference_id = b.id
+                      AND i.is_active = 1
+                    ORDER BY i.sort_order ASC
+                    LIMIT 1) AS image
+            FROM branches b
+            WHERE b.is_active = 1
+            ORDER BY b.sort_order ASC
+            """
+        )
+        branches = cursor.fetchall()
+
+        return {
+            "success": True,
+            "data": branches,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting public branches: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_BRANCHES_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()
