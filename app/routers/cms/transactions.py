@@ -39,8 +39,8 @@ class CheckoutRequest(BaseModel):
     customer_email: Optional[str] = None
     discount_type: Optional[str] = Field(None, pattern=r"^(percentage|fixed)$")
     discount_value: Optional[float] = Field(None, ge=0)
-    voucher_code: Optional[str] = None
-    promo_id: Optional[int] = None
+    promo_ids: Optional[List[int]] = None
+    voucher_codes: Optional[List[str]] = None
     notes: Optional[str] = None
 
 
@@ -302,9 +302,11 @@ def checkout(
 
         subtotal_after_discount = subtotal - transaction_discount_amount
 
-        # Apply promo if provided
+        # Apply promos (multiple stacking)
+        all_promo_ids = list(request.promo_ids) if request.promo_ids else []
         promo_discount = 0
-        if request.promo_id:
+        applied_promo_ids = []
+        for pid in all_promo_ids:
             cursor.execute(
                 """
                 SELECT * FROM promos
@@ -312,64 +314,59 @@ def checkout(
                 AND start_date <= NOW() AND end_date >= NOW()
                 AND (usage_limit IS NULL OR usage_count < usage_limit)
                 """,
-                (request.promo_id,),
+                (pid,),
             )
             promo = cursor.fetchone()
 
             if promo:
-                # Check per_user_limit
                 per_user_limit = promo.get("per_user_limit") or 0
                 if per_user_limit > 0 and buyer_user_id:
                     cursor.execute(
                         "SELECT COUNT(*) as cnt FROM discount_usages WHERE discount_type = 'promo' AND discount_id = %s AND user_id = %s",
                         (promo["id"], buyer_user_id),
                     )
-                    user_usage = cursor.fetchone()["cnt"]
-                    if user_usage >= per_user_limit:
-                        promo = None  # User sudah melebihi batas
+                    if cursor.fetchone()["cnt"] >= per_user_limit:
+                        promo = None
 
             if promo:
-                # Check applicable_to & applicable_items
                 promo_applicable = promo.get("applicable_to") or "all"
                 matched_items = filter_applicable_items(
                     transaction_items, promo_applicable, promo.get("applicable_items")
                 )
 
                 if not matched_items and promo_applicable != "all":
-                    pass  # No matching items, skip promo
+                    continue
+
+                if promo_applicable != "all" or promo.get("applicable_items"):
+                    applicable_subtotal = sum(i["subtotal"] for i in matched_items)
                 else:
-                    # Calculate subtotal of matched items only (for applicable filtering)
-                    if promo_applicable != "all" or promo.get("applicable_items"):
-                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
-                    else:
-                        applicable_subtotal = subtotal_after_discount
+                    applicable_subtotal = subtotal_after_discount
 
-                    # Check min purchase
-                    min_purchase = float(promo.get("min_purchase") or 0)
-                    if min_purchase <= 0 or applicable_subtotal >= min_purchase:
-                        if promo["promo_type"] == "percentage":
-                            promo_discount = applicable_subtotal * (float(promo["discount_value"]) / 100)
-                            if promo.get("max_discount"):
-                                promo_discount = min(promo_discount, float(promo["max_discount"]))
-                        elif promo["promo_type"] == "fixed":
-                            promo_discount = min(float(promo["discount_value"]), applicable_subtotal)
-                        elif promo["promo_type"] == "free_item":
-                            # Gratiskan 1 qty item termurah dari matched items
-                            cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
-                            promo_discount = min(cheapest_price, applicable_subtotal)
+                min_purchase = float(promo.get("min_purchase") or 0)
+                if min_purchase > 0 and applicable_subtotal < min_purchase:
+                    continue
 
-                        promo_discount = min(promo_discount, subtotal_after_discount)
-                        subtotal_after_discount -= promo_discount
+                this_discount = 0
+                if promo["promo_type"] == "percentage":
+                    this_discount = applicable_subtotal * (float(promo["discount_value"]) / 100)
+                    if promo.get("max_discount"):
+                        this_discount = min(this_discount, float(promo["max_discount"]))
+                elif promo["promo_type"] == "fixed":
+                    this_discount = min(float(promo["discount_value"]), applicable_subtotal)
+                elif promo["promo_type"] == "free_item":
+                    cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                    this_discount = min(cheapest_price, applicable_subtotal)
 
-                        # Update promo usage
-                        cursor.execute(
-                            "UPDATE promos SET usage_count = IFNULL(usage_count, 0) + 1 WHERE id = %s",
-                            (promo["id"],),
-                        )
+                this_discount = min(this_discount, subtotal_after_discount)
+                promo_discount += this_discount
+                subtotal_after_discount -= this_discount
+                applied_promo_ids.append(promo["id"])
 
-        # Apply voucher if provided
+        # Apply vouchers (multiple stacking)
+        all_voucher_codes = list(request.voucher_codes) if request.voucher_codes else []
         voucher_discount = 0
-        if request.voucher_code:
+        applied_voucher_codes = []
+        for vcode in all_voucher_codes:
             cursor.execute(
                 """
                 SELECT * FROM vouchers
@@ -377,53 +374,50 @@ def checkout(
                 AND start_date <= NOW() AND end_date >= NOW()
                 AND (usage_limit IS NULL OR usage_count < usage_limit)
                 """,
-                (request.voucher_code,),
+                (vcode,),
             )
             voucher = cursor.fetchone()
 
             if voucher:
-                # Check is_single_use (sekali pakai per user)
                 if voucher.get("is_single_use") and buyer_user_id:
                     cursor.execute(
                         "SELECT COUNT(*) as cnt FROM discount_usages WHERE discount_type = 'voucher' AND discount_id = %s AND user_id = %s",
                         (voucher["id"], buyer_user_id),
                     )
                     if cursor.fetchone()["cnt"] > 0:
-                        voucher = None  # User sudah pernah pakai
+                        voucher = None
 
-            if voucher:
-                # Check applicable_to & applicable_items
-                voucher_applicable = voucher.get("applicable_to") or "all"
-                matched_items = filter_applicable_items(
-                    transaction_items, voucher_applicable, voucher.get("applicable_items")
-                )
+            if not voucher:
+                continue
 
-                if not matched_items and voucher_applicable != "all":
-                    pass  # No matching items, skip voucher
-                else:
-                    if voucher_applicable != "all" or voucher.get("applicable_items"):
-                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
-                    else:
-                        applicable_subtotal = subtotal_after_discount
+            voucher_applicable = voucher.get("applicable_to") or "all"
+            matched_items = filter_applicable_items(
+                transaction_items, voucher_applicable, voucher.get("applicable_items")
+            )
 
-                    if voucher["voucher_type"] == "percentage":
-                        voucher_discount = applicable_subtotal * (float(voucher["discount_value"]) / 100)
-                        if voucher["max_discount"]:
-                            voucher_discount = min(voucher_discount, float(voucher["max_discount"]))
-                    elif voucher["voucher_type"] == "free_item":
-                        cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
-                        voucher_discount = min(cheapest_price, applicable_subtotal)
-                    else:
-                        voucher_discount = min(float(voucher["discount_value"]), applicable_subtotal)
+            if not matched_items and voucher_applicable != "all":
+                continue
 
-                    voucher_discount = min(voucher_discount, subtotal_after_discount)
-                    subtotal_after_discount -= voucher_discount
+            if voucher_applicable != "all" or voucher.get("applicable_items"):
+                applicable_subtotal = sum(i["subtotal"] for i in matched_items)
+            else:
+                applicable_subtotal = subtotal_after_discount
 
-                    # Update voucher usage
-                    cursor.execute(
-                        "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
-                        (voucher["id"],),
-                    )
+            this_discount = 0
+            if voucher["voucher_type"] == "percentage":
+                this_discount = applicable_subtotal * (float(voucher["discount_value"]) / 100)
+                if voucher.get("max_discount"):
+                    this_discount = min(this_discount, float(voucher["max_discount"]))
+            elif voucher["voucher_type"] == "free_item":
+                cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                this_discount = min(cheapest_price, applicable_subtotal)
+            else:
+                this_discount = min(float(voucher["discount_value"]), applicable_subtotal)
+
+            this_discount = min(this_discount, subtotal_after_discount)
+            voucher_discount += this_discount
+            subtotal_after_discount -= this_discount
+            applied_voucher_codes.append(voucher["code"])
 
         # Calculate tax and service charge
         tax_amount = subtotal_after_discount * (tax_percentage / 100) if tax_enabled else 0
@@ -433,6 +427,9 @@ def checkout(
 
         # Create transaction
         transaction_code = generate_transaction_code(branch_code)
+        promo_ids_json = json.dumps(applied_promo_ids) if applied_promo_ids else None
+        voucher_codes_json = json.dumps(applied_voucher_codes) if applied_voucher_codes else None
+
         cursor.execute(
             """
             INSERT INTO transactions
@@ -440,7 +437,7 @@ def checkout(
              subtotal, discount_type, discount_value, discount_amount, subtotal_after_discount,
              tax_percentage, tax_amount, service_charge_percentage, service_charge_amount,
              grand_total, payment_method, payment_status, paid_amount, paid_at,
-             promo_id, promo_discount, voucher_code, voucher_discount, notes, created_at)
+             promo_ids, promo_discount, voucher_codes, voucher_discount, notes, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -462,12 +459,12 @@ def checkout(
                 service_charge_amount,
                 grand_total,
                 request.payment_method,
-                "paid",
-                grand_total,
-                datetime.now(),
-                request.promo_id,
+                "pending",
+                0,
+                None,
+                promo_ids_json,
                 promo_discount,
-                request.voucher_code,
+                voucher_codes_json,
                 voucher_discount,
                 request.notes,
                 datetime.now(),
@@ -477,7 +474,6 @@ def checkout(
 
         # Create transaction items and process each
         for item in transaction_items:
-            import json
             metadata = {"details": {k: v for k, v in item["details"].items() if k not in ["price"]}}
 
             cursor.execute(
@@ -503,164 +499,19 @@ def checkout(
                 ),
             )
 
-            # Process based on item type
-            target_user_id = buyer_user_id
-
-            if item["item_type"] == "product" and not item["details"].get("is_rental"):
-                # Deduct stock from branch_product_stock
-                cursor.execute(
-                    "UPDATE branch_product_stock SET stock = stock - %s WHERE branch_id = %s AND product_id = %s AND stock >= %s",
-                    (item["quantity"], branch_id, item["item_id"], item["quantity"]),
-                )
-                if cursor.rowcount == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={
-                            "error_code": "INSUFFICIENT_STOCK",
-                            "message": f"Stok {item['item_name']} tidak mencukupi di cabang ini",
-                        },
-                    )
-
-                # Log stock change
-                cursor.execute(
-                    """
-                    INSERT INTO product_stock_logs
-                    (product_id, branch_id, type, quantity, stock_before, stock_after, reference_type, reference_id, created_by, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        item["item_id"],
-                        branch_id,
-                        "out",
-                        item["quantity"],
-                        item["details"]["stock"],
-                        item["details"]["stock"] - item["quantity"],
-                        "transaction",
-                        transaction_id,
-                        auth["user_id"],
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "membership" and target_user_id:
-                # Activate membership for the member
-                details = item["details"]
-                start_date_m = date.today()
-                end_date_m = None
-                visit_remaining = None
-
-                if details.get("visit_quota"):
-                    visit_remaining = details["visit_quota"]
-                elif details.get("duration_days"):
-                    end_date_m = start_date_m + timedelta(days=details["duration_days"])
-
-                membership_code = f"MBR-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-                cursor.execute(
-                    """
-                    INSERT INTO member_memberships
-                    (user_id, package_id, transaction_id, membership_code, start_date, end_date,
-                     visit_remaining, class_remaining, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        target_user_id,
-                        item["item_id"],
-                        transaction_id,
-                        membership_code,
-                        start_date_m,
-                        end_date_m,
-                        visit_remaining,
-                        details.get("class_quota"),
-                        "active",
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "class_pass" and target_user_id:
-                # Create class pass for the member
-                details = item["details"]
-                start_date_c = date.today()
-                expire_date_c = start_date_c + timedelta(days=details.get("valid_days", 30))
-
-                cursor.execute(
-                    """
-                    INSERT INTO member_class_passes
-                    (user_id, class_package_id, transaction_id, total_classes, used_classes,
-                     start_date, expire_date, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        target_user_id,
-                        item["item_id"],
-                        transaction_id,
-                        details.get("class_count", 1),
-                        0,
-                        start_date_c,
-                        expire_date_c,
-                        "active",
-                        datetime.now(),
-                    ),
-                )
-
-            elif item["item_type"] == "pt_package" and target_user_id:
-                # Create PT sessions for the member
-                details = item["details"]
-                start_date_p = date.today()
-                expire_date_p = start_date_p + timedelta(days=details.get("valid_days", 90))
-
-                cursor.execute(
-                    """
-                    INSERT INTO member_pt_sessions
-                    (user_id, pt_package_id, transaction_id, trainer_id, total_sessions, used_sessions,
-                     start_date, expire_date, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        target_user_id,
-                        item["item_id"],
-                        transaction_id,
-                        details.get("trainer_id"),
-                        details.get("session_count", 1),
-                        0,
-                        start_date_p,
-                        expire_date_p,
-                        "active",
-                        datetime.now(),
-                    ),
-                )
-
-        # Record discount usages
-        if promo_discount > 0 and request.promo_id:
-            cursor.execute(
-                """
-                INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                VALUES ('promo', %s, %s, %s, %s, %s)
-                """,
-                (request.promo_id, buyer_user_id, transaction_id, promo_discount, datetime.now()),
-            )
-        if voucher_discount > 0 and request.voucher_code:
-            cursor.execute(
-                "SELECT id FROM vouchers WHERE code = %s",
-                (request.voucher_code,),
-            )
-            voucher_row = cursor.fetchone()
-            if voucher_row:
-                cursor.execute(
-                    """
-                    INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                    VALUES ('voucher', %s, %s, %s, %s, %s)
-                    """,
-                    (voucher_row["id"], buyer_user_id, transaction_id, voucher_discount, datetime.now()),
-                )
+        # NOTE: Item processing (stock deduction, membership activation, etc.)
+        # and discount usage logging are handled in approve-payment endpoint.
+        # Checkout only creates the pending transaction + items.
 
         conn.commit()
 
         return {
             "success": True,
-            "message": "Transaksi berhasil",
+            "message": "Transaksi berhasil dibuat, menunggu persetujuan",
             "data": {
                 "transaction_id": transaction_id,
                 "transaction_code": transaction_code,
+                "payment_status": "pending",
                 "subtotal": subtotal,
                 "discount_amount": transaction_discount_amount + promo_discount + voucher_discount,
                 "promo_discount": promo_discount,
@@ -776,11 +627,9 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
         cursor.execute(
             """
             SELECT t.*, b.name as branch_name, b.code as branch_code,
-                   p.name as promo_name, p.promo_type, p.discount_value as promo_discount_value,
                    approver.name as approved_by_name
             FROM transactions t
             LEFT JOIN branches b ON t.branch_id = b.id
-            LEFT JOIN promos p ON t.promo_id = p.id
             LEFT JOIN users approver ON t.approved_by = approver.id
             WHERE t.id = %s
             """,
@@ -814,7 +663,7 @@ def get_transaction(transaction_id: int, auth: dict = Depends(verify_bearer_toke
             transaction["member"] = cursor.fetchone()
 
         # Format decimals
-        for key in ["subtotal", "discount_amount", "promo_discount", "voucher_discount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount", "promo_discount_value"]:
+        for key in ["subtotal", "discount_amount", "promo_discount", "voucher_discount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount"]:
             if transaction.get(key):
                 transaction[key] = float(transaction[key])
 
@@ -917,13 +766,11 @@ def get_all_transactions(
             f"""
             SELECT t.*, u.name as member_name, u.email as member_email,
                    s.name as staff_name,
-                   b.name as branch_name, b.code as branch_code,
-                   p.name as promo_name
+                   b.name as branch_name, b.code as branch_code
             FROM transactions t
             LEFT JOIN users u ON t.user_id = u.id
             LEFT JOIN users s ON t.staff_id = s.id
             LEFT JOIN branches b ON t.branch_id = b.id
-            LEFT JOIN promos p ON t.promo_id = p.id
             {where_sql}
             ORDER BY t.created_at DESC
             LIMIT %s OFFSET %s
@@ -1284,39 +1131,59 @@ def approve_payment(
                     ),
                 )
 
-        # Update promo usage_count
-        if transaction.get("promo_id") and transaction.get("promo_discount") and float(transaction["promo_discount"]) > 0:
-            cursor.execute(
-                "UPDATE promos SET usage_count = usage_count + 1 WHERE id = %s",
-                (transaction["promo_id"],),
-            )
-            cursor.execute(
-                """
-                INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                VALUES ('promo', %s, %s, %s, %s, %s)
-                """,
-                (transaction["promo_id"], target_user_id, transaction_id, float(transaction["promo_discount"]), datetime.now()),
-            )
+        # Update promo usage_count (multiple via promo_ids JSON)
+        promo_ids_to_log = []
+        if transaction.get("promo_ids"):
+            try:
+                promo_ids_to_log = json.loads(transaction["promo_ids"])
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-        # Update voucher usage_count
-        if transaction.get("voucher_code") and transaction.get("voucher_discount") and float(transaction["voucher_discount"]) > 0:
-            cursor.execute(
-                "SELECT id FROM vouchers WHERE code = %s",
-                (transaction["voucher_code"],),
-            )
-            voucher_row = cursor.fetchone()
-            if voucher_row:
+        promo_discount_total = float(transaction.get("promo_discount") or 0)
+        if promo_ids_to_log and promo_discount_total > 0:
+            per_promo_discount = promo_discount_total / len(promo_ids_to_log)
+            for pid in promo_ids_to_log:
                 cursor.execute(
-                    "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
-                    (voucher_row["id"],),
+                    "UPDATE promos SET usage_count = usage_count + 1 WHERE id = %s",
+                    (pid,),
                 )
                 cursor.execute(
                     """
                     INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
-                    VALUES ('voucher', %s, %s, %s, %s, %s)
+                    VALUES ('promo', %s, %s, %s, %s, %s)
                     """,
-                    (voucher_row["id"], target_user_id, transaction_id, float(transaction["voucher_discount"]), datetime.now()),
+                    (pid, target_user_id, transaction_id, per_promo_discount, datetime.now()),
                 )
+
+        # Update voucher usage_count (multiple via voucher_codes JSON)
+        voucher_codes_to_log = []
+        if transaction.get("voucher_codes"):
+            try:
+                voucher_codes_to_log = json.loads(transaction["voucher_codes"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        voucher_discount_total = float(transaction.get("voucher_discount") or 0)
+        if voucher_codes_to_log and voucher_discount_total > 0:
+            per_voucher_discount = voucher_discount_total / len(voucher_codes_to_log)
+            for vcode in voucher_codes_to_log:
+                cursor.execute(
+                    "SELECT id FROM vouchers WHERE code = %s",
+                    (vcode,),
+                )
+                voucher_row = cursor.fetchone()
+                if voucher_row:
+                    cursor.execute(
+                        "UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = %s",
+                        (voucher_row["id"],),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO discount_usages (discount_type, discount_id, user_id, transaction_id, discount_amount, used_at)
+                        VALUES ('voucher', %s, %s, %s, %s, %s)
+                        """,
+                        (voucher_row["id"], target_user_id, transaction_id, per_voucher_discount, datetime.now()),
+                    )
 
         # Mark transaction as paid
         now = datetime.now()

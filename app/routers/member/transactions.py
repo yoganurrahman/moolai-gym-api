@@ -33,10 +33,8 @@ class MemberCheckoutRequest(BaseModel):
     items: List[MemberCheckoutItem]
     payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
     auto_renew: bool = False
-    promo_id: Optional[int] = None  # legacy single promo
-    voucher_code: Optional[str] = None  # legacy single voucher
-    promo_ids: Optional[List[int]] = None  # multiple promos
-    voucher_codes: Optional[List[str]] = None  # multiple vouchers
+    promo_ids: Optional[List[int]] = None
+    voucher_codes: Optional[List[str]] = None
 
 
 # ============== Helper Functions ==============
@@ -221,19 +219,8 @@ def member_checkout(
 
         subtotal_after_discount = subtotal
 
-        # Resolve promo IDs (support both legacy single and new multiple)
-        all_promo_ids = []
-        if request.promo_ids:
-            all_promo_ids = list(request.promo_ids)
-        elif request.promo_id:
-            all_promo_ids = [request.promo_id]
-
-        # Resolve voucher codes (support both legacy single and new multiple)
-        all_voucher_codes = []
-        if request.voucher_codes:
-            all_voucher_codes = list(request.voucher_codes)
-        elif request.voucher_code:
-            all_voucher_codes = [request.voucher_code]
+        all_promo_ids = list(request.promo_ids) if request.promo_ids else []
+        all_voucher_codes = list(request.voucher_codes) if request.voucher_codes else []
 
         # Apply promos (multiple stacking)
         promo_discount = 0
@@ -357,6 +344,10 @@ def member_checkout(
 
         # Create transaction
         transaction_code = generate_transaction_code(branch_code)
+
+        promo_ids_json = json.dumps(applied_promo_ids) if applied_promo_ids else None
+        voucher_codes_json = json.dumps(applied_voucher_codes) if applied_voucher_codes else None
+
         cursor.execute(
             """
             INSERT INTO transactions
@@ -364,7 +355,7 @@ def member_checkout(
              subtotal, discount_type, discount_value, discount_amount, subtotal_after_discount,
              tax_percentage, tax_amount, service_charge_percentage, service_charge_amount,
              grand_total, payment_method, payment_status, paid_amount, paid_at,
-             promo_id, promo_discount, voucher_code, voucher_discount, notes, created_at)
+             promo_ids, promo_discount, voucher_codes, voucher_discount, notes, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -387,9 +378,9 @@ def member_checkout(
                 "pending",
                 0,
                 None,
-                json.dumps(applied_promo_ids) if applied_promo_ids else (request.promo_id if not request.promo_ids else None),
+                promo_ids_json,
                 promo_discount,
-                json.dumps(applied_voucher_codes) if applied_voucher_codes else (request.voucher_code if not request.voucher_codes else None),
+                voucher_codes_json,
                 voucher_discount,
                 f"Self-checkout (auto_renew={request.auto_renew})" if request.auto_renew else "Self-checkout",
                 datetime.now(),
@@ -778,15 +769,13 @@ def get_my_transactions(
         cursor.execute(
             """
             SELECT t.id, t.transaction_code, t.subtotal, t.discount_amount,
-                   t.promo_id, t.promo_discount, t.voucher_code, t.voucher_discount,
+                   t.promo_ids, t.promo_discount, t.voucher_codes, t.voucher_discount,
                    t.tax_amount, t.grand_total,
                    t.payment_method, t.payment_status, t.payment_proof,
                    t.paid_at, t.created_at,
-                   b.name as branch_name, b.code as branch_code,
-                   p.name as promo_name
+                   b.name as branch_name, b.code as branch_code
             FROM transactions t
             LEFT JOIN branches b ON t.branch_id = b.id
-            LEFT JOIN promos p ON t.promo_id = p.id
             WHERE t.user_id = %s
             ORDER BY t.created_at DESC
             LIMIT %s OFFSET %s
@@ -830,11 +819,9 @@ def get_transaction_detail(transaction_id: int, auth: dict = Depends(verify_bear
     try:
         cursor.execute(
             """
-            SELECT t.*, b.name as branch_name, b.code as branch_code,
-                   p.name as promo_name, p.promo_type, p.discount_value as promo_discount_value
+            SELECT t.*, b.name as branch_name, b.code as branch_code
             FROM transactions t
             LEFT JOIN branches b ON t.branch_id = b.id
-            LEFT JOIN promos p ON t.promo_id = p.id
             WHERE t.id = %s AND t.user_id = %s
             """,
             (transaction_id, auth["user_id"]),
@@ -848,7 +835,7 @@ def get_transaction_detail(transaction_id: int, auth: dict = Depends(verify_bear
             )
 
         # Format decimals
-        for key in ["subtotal", "discount_amount", "promo_discount", "voucher_discount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount", "promo_discount_value"]:
+        for key in ["subtotal", "discount_amount", "promo_discount", "voucher_discount", "subtotal_after_discount", "tax_amount", "service_charge_amount", "grand_total", "paid_amount"]:
             if transaction.get(key):
                 transaction[key] = float(transaction[key])
 

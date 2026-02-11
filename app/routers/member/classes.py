@@ -229,6 +229,17 @@ def get_class_type_detail(
                     user_booking_id = user_bookings.get(key)
                     capacity = schedule["capacity"]
 
+                    # Check if class time has already passed
+                    is_past = False
+                    if current_date == date.today():
+                        st = schedule["start_time"]
+                        if isinstance(st, timedelta):
+                            class_start_dt = datetime.combine(date.today(), (datetime.min + st).time())
+                        else:
+                            class_start_dt = datetime.combine(date.today(), st)
+                        if datetime.now() > class_start_dt:
+                            is_past = True
+
                     upcoming.append({
                         "id": schedule["id"],
                         "class_date": str(current_date),
@@ -244,6 +255,7 @@ def get_class_type_detail(
                         "is_full": booked >= capacity,
                         "is_booked": user_booking_id is not None,
                         "booking_id": user_booking_id,
+                        "is_past": is_past,
                     })
 
             current_date += timedelta(days=1)
@@ -394,6 +406,17 @@ def get_class_schedules(
                     )
                     user_booking = cursor.fetchone()
 
+                    # Check if class time has already passed
+                    is_past = False
+                    if current_date == date.today():
+                        st = schedule["start_time"]
+                        if isinstance(st, timedelta):
+                            class_start_dt = datetime.combine(date.today(), (datetime.min + st).time())
+                        else:
+                            class_start_dt = datetime.combine(date.today(), st)
+                        if datetime.now() > class_start_dt:
+                            is_past = True
+
                     schedule_copy = {
                         "id": schedule["id"],
                         "class_type_id": schedule["class_type_id"],
@@ -414,6 +437,7 @@ def get_class_schedules(
                         "is_full": booked >= schedule["capacity"],
                         "is_booked": user_booking is not None,
                         "booking_id": user_booking["id"] if user_booking else None,
+                        "is_past": is_past,
                     }
                     result.append(schedule_copy)
 
@@ -516,6 +540,21 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error_code": "PAST_DATE", "message": "Tidak bisa booking kelas yang sudah lewat"},
             )
+
+        # Check if class time has already passed today
+        if request.class_date == date.today():
+            start_time = schedule.get("start_time")
+            if start_time is not None:
+                # MySQL TIME comes as timedelta, convert to today's datetime
+                if isinstance(start_time, timedelta):
+                    class_start_dt = datetime.combine(date.today(), (datetime.min + start_time).time())
+                else:
+                    class_start_dt = datetime.combine(date.today(), start_time)
+                if datetime.now() > class_start_dt:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error_code": "CLASS_STARTED", "message": "Kelas sudah dimulai, tidak bisa booking"},
+                    )
 
         # Get booking advance days setting
         cursor.execute("SELECT value FROM settings WHERE `key` = 'class_booking_advance_days'")
