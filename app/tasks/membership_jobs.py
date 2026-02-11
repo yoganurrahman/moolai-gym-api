@@ -121,8 +121,8 @@ def job_auto_renew_memberships():
         cursor = conn.cursor(dictionary=True)
 
         # Cari membership yang baru saja expired dan punya auto_renew = 1
-        # Hanya membership berbasis durasi (duration_days IS NOT NULL)
-        # Membership daily/visit (end_date NULL) tidak bisa auto-renew
+        # Hanya membership berbasis durasi >= 7 hari (weekly ke atas)
+        # Daily pass (duration_days=1) tidak di-auto-renew
         cursor.execute(
             """
             SELECT mm.id, mm.member_id, mm.package_id, mm.branch_id,
@@ -137,6 +137,7 @@ def job_auto_renew_memberships():
               AND mm.status = 'expired'
               AND mm.end_date = %s
               AND mp.duration_days IS NOT NULL
+              AND mp.duration_days >= 7
             """,
             (today,),
         )
