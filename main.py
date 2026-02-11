@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+from app.tasks import start_scheduler, stop_scheduler
 
 load_dotenv()
 
@@ -28,8 +29,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan events"""
     # Startup
     logger.info("Starting Moolai Gym API...")
+    start_scheduler()
     yield
     # Shutdown
+    stop_scheduler()
     logger.info("Shutting down Moolai Gym API...")
 
 

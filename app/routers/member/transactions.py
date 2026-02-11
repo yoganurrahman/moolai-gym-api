@@ -33,8 +33,10 @@ class MemberCheckoutRequest(BaseModel):
     items: List[MemberCheckoutItem]
     payment_method: str = Field(..., pattern=r"^(cash|transfer|qris|card|ewallet)$")
     auto_renew: bool = False
-    promo_id: Optional[int] = None
-    voucher_code: Optional[str] = None
+    promo_id: Optional[int] = None  # legacy single promo
+    voucher_code: Optional[str] = None  # legacy single voucher
+    promo_ids: Optional[List[int]] = None  # multiple promos
+    voucher_codes: Optional[List[str]] = None  # multiple vouchers
 
 
 # ============== Helper Functions ==============
@@ -219,9 +221,24 @@ def member_checkout(
 
         subtotal_after_discount = subtotal
 
-        # Apply promo if provided
+        # Resolve promo IDs (support both legacy single and new multiple)
+        all_promo_ids = []
+        if request.promo_ids:
+            all_promo_ids = list(request.promo_ids)
+        elif request.promo_id:
+            all_promo_ids = [request.promo_id]
+
+        # Resolve voucher codes (support both legacy single and new multiple)
+        all_voucher_codes = []
+        if request.voucher_codes:
+            all_voucher_codes = list(request.voucher_codes)
+        elif request.voucher_code:
+            all_voucher_codes = [request.voucher_code]
+
+        # Apply promos (multiple stacking)
         promo_discount = 0
-        if request.promo_id:
+        applied_promo_ids = []
+        for pid in all_promo_ids:
             cursor.execute(
                 """
                 SELECT * FROM promos
@@ -229,12 +246,11 @@ def member_checkout(
                 AND start_date <= NOW() AND end_date >= NOW()
                 AND (usage_limit IS NULL OR usage_count < usage_limit)
                 """,
-                (request.promo_id,),
+                (pid,),
             )
             promo = cursor.fetchone()
 
             if promo:
-                # Check per_user_limit
                 per_user_limit = promo.get("per_user_limit") or 0
                 if per_user_limit > 0:
                     cursor.execute(
@@ -251,31 +267,37 @@ def member_checkout(
                 )
 
                 if not matched_items and promo_applicable != "all":
-                    pass
+                    continue
+
+                if promo_applicable != "all" or promo.get("applicable_items"):
+                    applicable_subtotal = sum(i["subtotal"] for i in matched_items)
                 else:
-                    if promo_applicable != "all" or promo.get("applicable_items"):
-                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
-                    else:
-                        applicable_subtotal = subtotal_after_discount
+                    applicable_subtotal = subtotal_after_discount
 
-                    min_purchase = float(promo.get("min_purchase") or 0)
-                    if min_purchase <= 0 or applicable_subtotal >= min_purchase:
-                        if promo["promo_type"] == "percentage":
-                            promo_discount = applicable_subtotal * (float(promo["discount_value"]) / 100)
-                            if promo.get("max_discount"):
-                                promo_discount = min(promo_discount, float(promo["max_discount"]))
-                        elif promo["promo_type"] == "fixed":
-                            promo_discount = min(float(promo["discount_value"]), applicable_subtotal)
-                        elif promo["promo_type"] == "free_item":
-                            cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
-                            promo_discount = min(cheapest_price, applicable_subtotal)
+                min_purchase = float(promo.get("min_purchase") or 0)
+                if min_purchase > 0 and applicable_subtotal < min_purchase:
+                    continue
 
-                        promo_discount = min(promo_discount, subtotal_after_discount)
-                        subtotal_after_discount -= promo_discount
+                this_discount = 0
+                if promo["promo_type"] == "percentage":
+                    this_discount = applicable_subtotal * (float(promo["discount_value"]) / 100)
+                    if promo.get("max_discount"):
+                        this_discount = min(this_discount, float(promo["max_discount"]))
+                elif promo["promo_type"] == "fixed":
+                    this_discount = min(float(promo["discount_value"]), applicable_subtotal)
+                elif promo["promo_type"] == "free_item":
+                    cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                    this_discount = min(cheapest_price, applicable_subtotal)
 
-        # Apply voucher if provided
+                this_discount = min(this_discount, subtotal_after_discount)
+                promo_discount += this_discount
+                subtotal_after_discount -= this_discount
+                applied_promo_ids.append(promo["id"])
+
+        # Apply vouchers (multiple stacking)
         voucher_discount = 0
-        if request.voucher_code:
+        applied_voucher_codes = []
+        for vcode in all_voucher_codes:
             cursor.execute(
                 """
                 SELECT * FROM vouchers
@@ -283,7 +305,7 @@ def member_checkout(
                 AND start_date <= NOW() AND end_date >= NOW()
                 AND (usage_limit IS NULL OR usage_count < usage_limit)
                 """,
-                (request.voucher_code,),
+                (vcode,),
             )
             voucher = cursor.fetchone()
 
@@ -296,32 +318,37 @@ def member_checkout(
                     if cursor.fetchone()["cnt"] > 0:
                         voucher = None
 
-            if voucher:
-                voucher_applicable = voucher.get("applicable_to") or "all"
-                matched_items = filter_applicable_items(
-                    transaction_items, voucher_applicable, voucher.get("applicable_items")
-                )
+            if not voucher:
+                continue
 
-                if not matched_items and voucher_applicable != "all":
-                    pass
-                else:
-                    if voucher_applicable != "all" or voucher.get("applicable_items"):
-                        applicable_subtotal = sum(i["subtotal"] for i in matched_items)
-                    else:
-                        applicable_subtotal = subtotal_after_discount
+            voucher_applicable = voucher.get("applicable_to") or "all"
+            matched_items = filter_applicable_items(
+                transaction_items, voucher_applicable, voucher.get("applicable_items")
+            )
 
-                    if voucher["voucher_type"] == "percentage":
-                        voucher_discount = applicable_subtotal * (float(voucher["discount_value"]) / 100)
-                        if voucher.get("max_discount"):
-                            voucher_discount = min(voucher_discount, float(voucher["max_discount"]))
-                    elif voucher["voucher_type"] == "free_item":
-                        cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
-                        voucher_discount = min(cheapest_price, applicable_subtotal)
-                    else:
-                        voucher_discount = min(float(voucher["discount_value"]), applicable_subtotal)
+            if not matched_items and voucher_applicable != "all":
+                continue
 
-                    voucher_discount = min(voucher_discount, subtotal_after_discount)
-                    subtotal_after_discount -= voucher_discount
+            if voucher_applicable != "all" or voucher.get("applicable_items"):
+                applicable_subtotal = sum(i["subtotal"] for i in matched_items)
+            else:
+                applicable_subtotal = subtotal_after_discount
+
+            this_discount = 0
+            if voucher["voucher_type"] == "percentage":
+                this_discount = applicable_subtotal * (float(voucher["discount_value"]) / 100)
+                if voucher.get("max_discount"):
+                    this_discount = min(this_discount, float(voucher["max_discount"]))
+            elif voucher["voucher_type"] == "free_item":
+                cheapest_price = min(i["unit_price"] for i in matched_items) if matched_items else 0
+                this_discount = min(cheapest_price, applicable_subtotal)
+            else:
+                this_discount = min(float(voucher["discount_value"]), applicable_subtotal)
+
+            this_discount = min(this_discount, subtotal_after_discount)
+            voucher_discount += this_discount
+            subtotal_after_discount -= this_discount
+            applied_voucher_codes.append(voucher["code"])
 
         # Calculate tax and service charge
         tax_amount = subtotal_after_discount * (tax_percentage / 100) if tax_enabled else 0
@@ -360,9 +387,9 @@ def member_checkout(
                 "pending",
                 0,
                 None,
-                request.promo_id,
+                json.dumps(applied_promo_ids) if applied_promo_ids else (request.promo_id if not request.promo_ids else None),
                 promo_discount,
-                request.voucher_code,
+                json.dumps(applied_voucher_codes) if applied_voucher_codes else (request.voucher_code if not request.voucher_codes else None),
                 voucher_discount,
                 f"Self-checkout (auto_renew={request.auto_renew})" if request.auto_renew else "Self-checkout",
                 datetime.now(),
@@ -560,7 +587,7 @@ def get_active_promos_for_member(
         cursor.execute(
             """
             SELECT id, name, description, promo_type, discount_value, min_purchase, max_discount,
-                   applicable_to, start_date, end_date, usage_limit, usage_count, per_user_limit
+                   applicable_to, applicable_items, start_date, end_date, usage_limit, usage_count, per_user_limit
             FROM promos
             WHERE is_active = 1 AND start_date <= NOW() AND end_date >= NOW()
             AND (usage_limit IS NULL OR usage_count < usage_limit)
@@ -570,11 +597,16 @@ def get_active_promos_for_member(
         )
         promos = cursor.fetchall()
 
-        # Convert decimals
+        # Convert decimals and parse applicable_items
         for p in promos:
             for key in ["discount_value", "min_purchase", "max_discount"]:
                 if p.get(key) is not None:
                     p[key] = float(p[key])
+            if p.get("applicable_items"):
+                try:
+                    p["applicable_items"] = json.loads(p["applicable_items"]) if isinstance(p["applicable_items"], str) else p["applicable_items"]
+                except (json.JSONDecodeError, TypeError):
+                    p["applicable_items"] = None
 
         return {"success": True, "data": promos}
 
@@ -601,7 +633,7 @@ def get_active_vouchers_for_member(
         cursor.execute(
             """
             SELECT id, code, voucher_type, discount_value, min_purchase, max_discount,
-                   applicable_to, start_date, end_date, usage_limit, usage_count, is_single_use
+                   applicable_to, applicable_items, start_date, end_date, usage_limit, usage_count, is_single_use
             FROM vouchers
             WHERE is_active = 1 AND start_date <= NOW() AND end_date >= NOW()
             AND (usage_limit IS NULL OR usage_count < usage_limit)
@@ -614,6 +646,11 @@ def get_active_vouchers_for_member(
             for key in ["discount_value", "min_purchase", "max_discount"]:
                 if v.get(key) is not None:
                     v[key] = float(v[key])
+            if v.get("applicable_items"):
+                try:
+                    v["applicable_items"] = json.loads(v["applicable_items"]) if isinstance(v["applicable_items"], str) else v["applicable_items"]
+                except (json.JSONDecodeError, TypeError):
+                    v["applicable_items"] = None
 
         return {"success": True, "data": vouchers}
 
