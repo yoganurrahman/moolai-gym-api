@@ -593,7 +593,7 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
         # Check cancel window
         cursor.execute("SELECT value FROM settings WHERE `key` = 'pt_cancel_hours'")
         setting = cursor.fetchone()
-        cancel_hours = int(setting["value"]) if setting else 24
+        cancel_hours = int(setting["value"])
 
         start_time = booking["start_time"]
         if isinstance(start_time, timedelta):

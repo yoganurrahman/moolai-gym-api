@@ -733,7 +733,7 @@ def get_today_class_schedule(
                    u.name as trainer_name,
                    b.name as branch_name,
                    (SELECT COUNT(*) FROM class_bookings cb
-                    WHERE cb.schedule_id = cs.id AND cb.class_date = %s AND cb.status IN ('booked', 'attended')) as booked_count,
+                    WHERE cb.schedule_id = cs.id AND cb.class_date = %s AND cb.status IN ('booked', 'attended', 'no_show')) as booked_count,
                    (SELECT COUNT(*) FROM class_bookings cb
                     WHERE cb.schedule_id = cs.id AND cb.class_date = %s AND cb.status = 'attended') as attended_count
             FROM class_schedules cs
@@ -798,7 +798,7 @@ def get_bookings_calendar(
             f"""
             SELECT cb.class_date,
                    COUNT(*) as total_bookings,
-                   SUM(CASE WHEN cb.status = 'booked' THEN 1 ELSE 0 END) as booked_count,
+                   SUM(CASE WHEN cb.status IN ('booked', 'no_show') THEN 1 ELSE 0 END) as booked_count,
                    SUM(CASE WHEN cb.status = 'attended' THEN 1 ELSE 0 END) as attended_count,
                    COUNT(DISTINCT cb.schedule_id) as class_count
             FROM class_bookings cb
@@ -858,7 +858,7 @@ def get_bookings_calendar(
                         """
                         SELECT COUNT(*) as cnt FROM class_bookings
                         WHERE schedule_id = %s AND class_date = %s
-                        AND status IN ('booked', 'attended')
+                        AND status IN ('booked', 'attended', 'no_show')
                         """,
                         [s["schedule_id"], current],
                     )
@@ -929,7 +929,7 @@ def get_bookings_by_date(
                    b.name as branch_name,
                    (SELECT COUNT(*) FROM class_bookings cb
                     WHERE cb.schedule_id = cs.id AND cb.class_date = %s
-                    AND cb.status IN ('booked', 'attended')) as booked_count,
+                    AND cb.status IN ('booked', 'attended', 'no_show')) as booked_count,
                    (SELECT COUNT(*) FROM class_bookings cb
                     WHERE cb.schedule_id = cs.id AND cb.class_date = %s
                     AND cb.status = 'attended') as attended_count
@@ -998,7 +998,12 @@ def mark_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token)):
 
     try:
         cursor.execute(
-            "SELECT * FROM class_bookings WHERE id = %s AND status = 'booked'",
+            """
+            SELECT cb.*, cs.start_time as schedule_start_time
+            FROM class_bookings cb
+            LEFT JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cb.id = %s AND cb.status = 'booked'
+            """,
             (booking_id,),
         )
         booking = cursor.fetchone()
@@ -1008,6 +1013,21 @@ def mark_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah diproses"},
             )
+
+        # Validate: can only mark attended after class start time
+        if booking.get("class_date") and booking.get("schedule_start_time"):
+            start_time = booking["schedule_start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            class_datetime = datetime.combine(booking["class_date"], start_time)
+            if datetime.now() < class_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "CLASS_NOT_STARTED",
+                        "message": "Tidak bisa menandai hadir, kelas belum dimulai",
+                    },
+                )
 
         cursor.execute(
             """
@@ -1048,7 +1068,12 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
 
     try:
         cursor.execute(
-            "SELECT * FROM class_bookings WHERE id = %s AND status = 'booked'",
+            """
+            SELECT cb.*, cs.start_time as schedule_start_time
+            FROM class_bookings cb
+            LEFT JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cb.id = %s AND cb.status = 'booked'
+            """,
             (booking_id,),
         )
         booking = cursor.fetchone()
@@ -1058,6 +1083,21 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah diproses"},
             )
+
+        # Validate: can only mark no-show after class start time
+        if booking.get("class_date") and booking.get("schedule_start_time"):
+            start_time = booking["schedule_start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            class_datetime = datetime.combine(booking["class_date"], start_time)
+            if datetime.now() < class_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "CLASS_NOT_STARTED",
+                        "message": "Tidak bisa menandai no-show, kelas belum dimulai",
+                    },
+                )
 
         cursor.execute(
             """
@@ -1098,7 +1138,12 @@ def cancel_booking_admin(booking_id: int, auth: dict = Depends(verify_bearer_tok
 
     try:
         cursor.execute(
-            "SELECT * FROM class_bookings WHERE id = %s AND status = 'booked'",
+            """
+            SELECT cb.*, cs.start_time as schedule_start_time
+            FROM class_bookings cb
+            LEFT JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cb.id = %s AND cb.status = 'booked'
+            """,
             (booking_id,),
         )
         booking = cursor.fetchone()
@@ -1108,6 +1153,25 @@ def cancel_booking_admin(booking_id: int, auth: dict = Depends(verify_bearer_tok
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
             )
+
+        # Check cancel window from settings
+        cursor.execute("SELECT value FROM settings WHERE `key` = 'class_cancel_hours'")
+        setting = cursor.fetchone()
+        cancel_hours = int(setting["value"])
+
+        if booking.get("class_date") and booking.get("schedule_start_time"):
+            start_time = booking["schedule_start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            class_datetime = datetime.combine(booking["class_date"], start_time)
+            if datetime.now() > class_datetime - timedelta(hours=cancel_hours):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "CANCEL_TOO_LATE",
+                        "message": f"Pembatalan harus dilakukan minimal {cancel_hours} jam sebelumnya",
+                    },
+                )
 
         cursor.execute(
             """
@@ -1449,7 +1513,7 @@ def book_class_for_member(
         cursor.execute(
             """
             SELECT COUNT(*) as booked FROM class_bookings
-            WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended')
+            WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended', 'no_show')
             """,
             (request.schedule_id, request.class_date),
         )

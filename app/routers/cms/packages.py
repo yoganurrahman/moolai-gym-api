@@ -51,7 +51,7 @@ class PackageUpdate(BaseModel):
 @router.get("")
 def get_packages(
     package_type: Optional[str] = Query(None, description="Filter by package type"),
-    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    is_active: Optional[bool] = Query(True, description="Filter by active status (default: active only)"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     auth: dict = Depends(verify_bearer_token),

@@ -505,7 +505,7 @@ def cancel_pt_booking(
         # Check cancel window
         cursor.execute("SELECT value FROM settings WHERE `key` = 'pt_cancel_hours'")
         setting = cursor.fetchone()
-        cancel_hours = int(setting["value"]) if setting else 24
+        cancel_hours = int(setting["value"])
 
         start_time = booking["start_time"]
         if isinstance(start_time, timedelta):
@@ -762,6 +762,21 @@ def mark_pt_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah diproses"},
             )
 
+        # Validate: can only mark attended after session start time
+        if booking.get("booking_date") and booking.get("start_time"):
+            start_time = booking["start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            booking_datetime = datetime.combine(booking["booking_date"], start_time)
+            if datetime.now() < booking_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "SESSION_NOT_STARTED",
+                        "message": "Tidak bisa menandai hadir, sesi PT belum dimulai",
+                    },
+                )
+
         # Update booking to attended
         cursor.execute(
             """
@@ -841,6 +856,21 @@ def no_show_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
             )
+
+        # Validate: can only mark no-show after session start time
+        if booking.get("booking_date") and booking.get("start_time"):
+            start_time = booking["start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            booking_datetime = datetime.combine(booking["booking_date"], start_time)
+            if datetime.now() < booking_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "SESSION_NOT_STARTED",
+                        "message": "Tidak bisa menandai no-show, sesi PT belum dimulai",
+                    },
+                )
 
         cursor.execute(
             """

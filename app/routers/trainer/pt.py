@@ -224,6 +224,21 @@ def complete_pt_session(
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau bukan milik Anda"},
             )
 
+        # Validate: can only mark attended after session start time
+        if booking.get("booking_date") and booking.get("start_time"):
+            start_time = booking["start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            booking_datetime = datetime.combine(booking["booking_date"], start_time)
+            if datetime.now() < booking_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "SESSION_NOT_STARTED",
+                        "message": "Tidak bisa menandai hadir, sesi PT belum dimulai",
+                    },
+                )
+
         # Update booking to attended
         notes = request.notes if request else None
         cursor.execute(
@@ -300,6 +315,21 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau bukan milik Anda"},
             )
+
+        # Validate: can only mark no-show after session start time
+        if booking.get("booking_date") and booking.get("start_time"):
+            start_time = booking["start_time"]
+            if isinstance(start_time, timedelta):
+                start_time = (datetime.min + start_time).time()
+            booking_datetime = datetime.combine(booking["booking_date"], start_time)
+            if datetime.now() < booking_datetime:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "SESSION_NOT_STARTED",
+                        "message": "Tidak bisa menandai no-show, sesi PT belum dimulai",
+                    },
+                )
 
         # Mark as no-show (session already consumed at booking time, not refunded)
         cursor.execute(

@@ -64,7 +64,7 @@ def get_class_types(
                 FROM class_types ct
                 LEFT JOIN class_schedules cs ON ct.id = cs.class_type_id
                 LEFT JOIN class_bookings cb ON cs.id = cb.schedule_id
-                    AND cb.status IN ('booked', 'attended')
+                    AND cb.status IN ('booked', 'attended', 'no_show')
                 WHERE ct.is_active = 1
                 GROUP BY ct.id, ct.name, ct.description, ct.default_duration, ct.color
                 ORDER BY total_bookings DESC, ct.name ASC
@@ -191,7 +191,7 @@ def get_class_type_detail(
                 FROM class_bookings
                 WHERE schedule_id IN ({placeholders})
                   AND class_date BETWEEN %s AND %s
-                  AND status IN ('booked', 'attended')
+                  AND status IN ('booked', 'attended', 'no_show')
                 GROUP BY schedule_id, class_date
                 """,
                 schedule_ids + [date_from, date_to],
@@ -390,7 +390,7 @@ def get_class_schedules(
                         """
                         SELECT COUNT(*) as booked
                         FROM class_bookings
-                        WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended')
+                        WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended', 'no_show')
                         """,
                         (schedule["id"], current_date),
                     )
@@ -638,7 +638,7 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
         cursor.execute(
             """
             SELECT COUNT(*) as booked FROM class_bookings
-            WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended')
+            WHERE schedule_id = %s AND class_date = %s AND status IN ('booked', 'attended', 'no_show')
             """,
             (request.schedule_id, request.class_date),
         )
@@ -795,7 +795,7 @@ def cancel_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
         # Check cancel window
         cursor.execute("SELECT value FROM settings WHERE `key` = 'class_cancel_hours'")
         setting = cursor.fetchone()
-        cancel_hours = int(setting["value"]) if setting else 2
+        cancel_hours = int(setting["value"])
 
         start_time = booking["start_time"]
         if isinstance(start_time, timedelta):
