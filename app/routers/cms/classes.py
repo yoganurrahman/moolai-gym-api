@@ -1012,10 +1012,10 @@ def mark_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token)):
         cursor.execute(
             """
             UPDATE class_bookings
-            SET status = 'attended', attended_at = %s, updated_at = %s
+            SET status = 'attended', attended_at = %s, completed_by = %s, updated_at = %s
             WHERE id = %s
             """,
-            (datetime.now(), datetime.now(), booking_id),
+            (datetime.now(), auth["user_id"], datetime.now(), booking_id),
         )
         conn.commit()
 

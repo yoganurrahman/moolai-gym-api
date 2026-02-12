@@ -809,15 +809,15 @@ CREATE TABLE `member_pt_sessions` (
 --   - MANY-TO-ONE ke member_pt_sessions (member_pt_session_id) - dari paket PT mana
 --   - MANY-TO-ONE ke users (user_id) - member yang booking
 --   - MANY-TO-ONE ke trainers (trainer_id) - trainer yang dipilih
---   - MANY-TO-ONE ke users (completed_by) - trainer yang mark complete
+--   - MANY-TO-ONE ke users (completed_by) - trainer yang mark hadir
 -- STATUS:
 --   - booked: Sudah di-booking
---   - completed: Session selesai dilakukan
+--   - attended: Session dinyatakan hadir
 --   - cancelled: Dibatalkan
 --   - no_show: Member tidak datang
 -- BUSINESS RULES:
 --   - Saat booking, cek remaining_sessions > 0
---   - Saat complete, increment used_sessions di member_pt_sessions
+--   - Saat attended, increment used_sessions di member_pt_sessions
 --   - Cancel harus minimal X jam sebelumnya (setting: pt_cancel_hours)
 -- ----------------------------
 DROP TABLE IF EXISTS `pt_bookings`;
@@ -830,12 +830,12 @@ CREATE TABLE `pt_bookings` (
   `booking_date` date NOT NULL,
   `start_time` time NOT NULL,
   `end_time` time NOT NULL,
-  `status` enum('booked','completed','cancelled','no_show') NOT NULL DEFAULT 'booked',
+  `status` enum('booked','attended','cancelled','no_show') NOT NULL DEFAULT 'booked',
   `notes` text DEFAULT NULL,
   `cancelled_at` datetime DEFAULT NULL,
   `cancellation_reason` varchar(255) DEFAULT NULL,
-  `completed_at` datetime DEFAULT NULL,
-  `completed_by` int(11) DEFAULT NULL COMMENT 'Trainer yang mark complete',
+  `attended_at` datetime DEFAULT NULL,
+  `completed_by` int(11) DEFAULT NULL COMMENT 'Trainer yang mark hadir',
   `created_at` datetime DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT NULL ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
@@ -1016,6 +1016,7 @@ CREATE TABLE `class_bookings` (
   `cancelled_at` datetime DEFAULT NULL,
   `cancellation_reason` varchar(255) DEFAULT NULL,
   `attended_at` datetime DEFAULT NULL,
+  `completed_by` int(11) DEFAULT NULL COMMENT 'User (trainer/staff) yang mark hadir',
   `waitlist_position` int(11) DEFAULT NULL COMMENT 'Posisi di waitlist jika penuh',
   `notes` varchar(255) DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
@@ -1958,11 +1959,11 @@ INSERT INTO `transaction_items` (`transaction_id`, `item_type`, `item_id`, `item
 INSERT INTO `member_pt_sessions` (`id`, `user_id`, `pt_package_id`, `transaction_id`, `trainer_id`, `total_sessions`, `used_sessions`, `start_date`, `expire_date`, `status`, `created_at`) VALUES
 (1, 7, 3, 4, 1, 10, 3, '2026-01-02', '2026-04-02', 'active', '2026-01-02 15:00:00');
 
--- PT Bookings (3 session sudah selesai)
-INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `completed_at`, `completed_by`, `created_at`) VALUES
-(1, 1, 7, 1, '2026-01-05', '10:00:00', '11:00:00', 'completed', 'Session 1: Fitness assessment & goal setting', '2026-01-05 11:00:00', 5, '2026-01-03 14:00:00'),
-(1, 1, 7, 1, '2026-01-12', '10:00:00', '11:00:00', 'completed', 'Session 2: Upper body workout', '2026-01-12 11:00:00', 5, '2026-01-08 10:00:00'),
-(1, 1, 7, 1, '2026-01-19', '10:00:00', '11:00:00', 'completed', 'Session 3: Lower body & core workout', '2026-01-19 11:00:00', 5, '2026-01-15 09:00:00'),
+-- PT Bookings (3 session sudah attended)
+INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `attended_at`, `completed_by`, `created_at`) VALUES
+(1, 1, 7, 1, '2026-01-05', '10:00:00', '11:00:00', 'attended', 'Session 1: Fitness assessment & goal setting', '2026-01-05 11:00:00', 5, '2026-01-03 14:00:00'),
+(1, 1, 7, 1, '2026-01-12', '10:00:00', '11:00:00', 'attended', 'Session 2: Upper body workout', '2026-01-12 11:00:00', 5, '2026-01-08 10:00:00'),
+(1, 1, 7, 1, '2026-01-19', '10:00:00', '11:00:00', 'attended', 'Session 3: Lower body & core workout', '2026-01-19 11:00:00', 5, '2026-01-15 09:00:00'),
 (1, 1, 7, 1, '2026-01-26', '10:00:00', '11:00:00', 'booked', 'Session 4: Cardio & HIIT', NULL, NULL, '2026-01-22 16:00:00'),
 (1, 1, 7, 1, '2026-02-02', '10:00:00', '11:00:00', 'booked', 'Session 5: Full body workout', NULL, NULL, '2026-01-22 16:00:00');
 
@@ -2302,10 +2303,10 @@ INSERT INTO `audit_logs` (`branch_id`, `table_name`, `record_id`, `action`, `use
 -- Membership freeze
 (1, 'member_memberships', 5, 'update', 2, '{"status": "active"}', '{"status": "frozen", "freeze_reason": "Sakit / istirahat dokter"}', '192.168.1.100', '2026-01-20 10:00:00'),
 
--- PT Session completion
-(1, 'pt_bookings', 1, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-05 11:00:00"}', '192.168.1.101', '2026-01-05 11:00:00'),
-(1, 'pt_bookings', 2, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-12 11:00:00"}', '192.168.1.101', '2026-01-12 11:00:00'),
-(1, 'pt_bookings', 3, 'update', 5, '{"status": "booked"}', '{"status": "completed", "completed_at": "2026-01-19 11:00:00"}', '192.168.1.101', '2026-01-19 11:00:00'),
+-- PT Session attendance
+(1, 'pt_bookings', 1, 'update', 5, '{"status": "booked"}', '{"status": "attended", "attended_at": "2026-01-05 11:00:00"}', '192.168.1.101', '2026-01-05 11:00:00'),
+(1, 'pt_bookings', 2, 'update', 5, '{"status": "booked"}', '{"status": "attended", "attended_at": "2026-01-12 11:00:00"}', '192.168.1.101', '2026-01-12 11:00:00'),
+(1, 'pt_bookings', 3, 'update', 5, '{"status": "booked"}', '{"status": "attended", "attended_at": "2026-01-19 11:00:00"}', '192.168.1.101', '2026-01-19 11:00:00'),
 
 -- Stock adjustments
 (1, 'products', 5, 'update', 2, '{"stock": 38}', '{"stock": 36, "reason": "Energy bar expired"}', '192.168.1.100', '2026-01-26 16:00:00'),
@@ -2368,11 +2369,11 @@ INSERT INTO `class_schedules` (`branch_id`, `class_type_id`, `trainer_id`, `day_
 
 -- PT Bookings Siti di Tangerang (branch_id=2, trainer=1=Coach Eko)
 -- Session 6 & 7 di Tangerang (karena Siti sedang di Tangerang)
-INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `completed_at`, `completed_by`, `created_at`) VALUES
-(2, 1, 7, 1, '2026-02-07', '09:00:00', '10:00:00', 'completed', 'Session 6: Strength training @Tangerang', '2026-02-07 10:00:00', 5, '2026-02-03 14:00:00'),
+INSERT INTO `pt_bookings` (`branch_id`, `member_pt_session_id`, `user_id`, `trainer_id`, `booking_date`, `start_time`, `end_time`, `status`, `notes`, `attended_at`, `completed_by`, `created_at`) VALUES
+(2, 1, 7, 1, '2026-02-07', '09:00:00', '10:00:00', 'attended', 'Session 6: Strength training @Tangerang', '2026-02-07 10:00:00', 5, '2026-02-03 14:00:00'),
 (2, 1, 7, 1, '2026-02-14', '09:00:00', '10:00:00', 'booked', 'Session 7: HIIT cardio @Tangerang', NULL, NULL, '2026-02-10 09:00:00');
 
--- Update Siti's PT sessions: 4 used now (3 JKT + 1 TNG completed)
+-- Update Siti's PT sessions: 4 used now (3 JKT + 1 TNG attended)
 -- remaining_sessions is auto-calculated (generated column: total - used)
 UPDATE `member_pt_sessions` SET used_sessions = 4 WHERE id = 1;
 

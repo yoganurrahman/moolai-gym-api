@@ -126,7 +126,7 @@ def get_my_profile(auth: dict = Depends(verify_bearer_token)):
             """
             SELECT
                 COUNT(*) as total_sessions_handled,
-                COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed,
+                COUNT(CASE WHEN status = 'attended' THEN 1 END) as attended,
                 COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_shows
             FROM pt_bookings
             WHERE trainer_id = %s

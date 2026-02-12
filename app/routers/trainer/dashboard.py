@@ -343,7 +343,12 @@ def get_trainer_statistics(
                 COUNT(CASE WHEN status = 'attended' THEN 1 END) as attended,
                 COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_show,
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
-                COUNT(CASE WHEN status = 'booked' THEN 1 END) as booked
+                COUNT(CASE WHEN status = 'booked' THEN 1 END) as booked,
+                COUNT(
+                    CASE
+                        WHEN status = 'booked' AND TIMESTAMP(booking_date, end_time) < NOW() THEN 1
+                    END
+                ) as pt_pending_update
             FROM pt_bookings
             WHERE trainer_id = %s AND booking_date BETWEEN %s AND %s
             """,
@@ -360,7 +365,13 @@ def get_trainer_statistics(
             SELECT
                 COUNT(*) as total_class_bookings,
                 COUNT(CASE WHEN cb.status = 'attended' THEN 1 END) as class_attended,
-                COUNT(CASE WHEN cb.status = 'no_show' THEN 1 END) as class_no_show
+                COUNT(CASE WHEN cb.status = 'no_show' THEN 1 END) as class_no_show,
+                COUNT(
+                    CASE
+                        WHEN cb.status = 'booked'
+                             AND TIMESTAMP(cb.class_date, cs.end_time) < NOW() THEN 1
+                    END
+                ) as class_pending_update
             FROM class_bookings cb
             JOIN class_schedules cs ON cb.schedule_id = cs.id
             WHERE cs.trainer_id = %s AND cb.class_date BETWEEN %s AND %s
@@ -440,9 +451,11 @@ def get_trainer_statistics(
                     "cancelled": pt_summary["cancelled"],
                     "booked": pt_summary["booked"],
                     "attendance_rate": attendance_rate,
+                    "pt_pending_update": pt_summary["pt_pending_update"],
                     "total_class_sessions": total_class_sessions,
                     "class_attended": class_summary["class_attended"],
                     "class_no_show": class_summary["class_no_show"],
+                    "class_pending_update": class_summary["class_pending_update"],
                 },
                 "commission": {
                     "rate_per_session": rate,
@@ -508,10 +521,10 @@ def mark_class_attended(
         cursor.execute(
             """
             UPDATE class_bookings
-            SET status = 'attended', attended_at = %s, updated_at = %s
+            SET status = 'attended', attended_at = %s, completed_by = %s, updated_at = %s
             WHERE id = %s
             """,
-            (datetime.now(), datetime.now(), booking_id),
+            (datetime.now(), auth["user_id"], datetime.now(), booking_id),
         )
 
         conn.commit()

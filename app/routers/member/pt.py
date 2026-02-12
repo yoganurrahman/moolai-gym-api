@@ -378,7 +378,7 @@ def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_bra
         cursor.execute(
             """
             SELECT id FROM pt_bookings
-            WHERE trainer_id = %s AND booking_date = %s AND status IN ('booked', 'completed')
+            WHERE trainer_id = %s AND booking_date = %s AND status IN ('booked', 'attended')
             AND ((start_time <= %s AND end_time > %s) OR (start_time < %s AND end_time >= %s))
             """,
             (request.trainer_id, request.booking_date, request.start_time, request.start_time, end_time, end_time),
@@ -393,7 +393,7 @@ def book_pt_session(request: BookPTRequest, branch_id: int = Depends(require_bra
         cursor.execute(
             """
             SELECT id FROM pt_bookings
-            WHERE user_id = %s AND booking_date = %s AND status IN ('booked', 'completed')
+            WHERE user_id = %s AND booking_date = %s AND status IN ('booked', 'attended')
             AND ((start_time <= %s AND end_time > %s) OR (start_time < %s AND end_time >= %s))
             """,
             (user_id, request.booking_date, request.start_time, request.start_time, end_time, end_time),
