@@ -339,7 +339,7 @@ def get_trainer_statistics(
         cursor.execute(
             """
             SELECT
-                COUNT(*) as total_pt_sessions,
+                COUNT(CASE WHEN status IN ('booked', 'attended', 'no_show') THEN 1 END) as total_pt_sessions,
                 COUNT(CASE WHEN status = 'attended' THEN 1 END) as attended,
                 COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_show,
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
@@ -401,7 +401,10 @@ def get_trainer_statistics(
         trainer_info = cursor.fetchone()
         rate = float(trainer_info["rate_per_session"] or 0)
         commission_pct = float(trainer_info["commission_percentage"] or 0)
-        estimated_earnings = round(rate * pt_summary["attended"] * commission_pct / 100)
+        commission_sessions = (
+            pt_summary["attended"] + pt_summary["no_show"] + pt_summary["pt_pending_update"]
+        )
+        estimated_earnings = round(rate * commission_sessions * commission_pct / 100)
 
         # PT by period (daily breakdown)
         cursor.execute(
@@ -460,6 +463,7 @@ def get_trainer_statistics(
                 "commission": {
                     "rate_per_session": rate,
                     "commission_percentage": commission_pct,
+                    "session_count": commission_sessions,
                     "estimated_earnings": estimated_earnings,
                 },
                 "pt_by_period": pt_by_period,
