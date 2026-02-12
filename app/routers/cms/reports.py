@@ -160,7 +160,7 @@ def get_dashboard(
             f"""
             SELECT COUNT(*) as total_pt
             FROM pt_bookings
-            WHERE booking_date = %s AND status IN ('booked', 'completed')
+            WHERE booking_date = %s AND status IN ('booked', 'attended')
             {pt_branch_filter}
             """,
             pt_params,

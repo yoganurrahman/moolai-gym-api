@@ -346,7 +346,7 @@ def book_pt_session(
             """
             SELECT id FROM pt_bookings
             WHERE trainer_id = %s AND booking_date = %s
-            AND status IN ('booked', 'completed')
+            AND status IN ('booked', 'attended')
             AND (
                 (start_time <= %s AND end_time > %s)
                 OR (start_time < %s AND end_time >= %s)
@@ -371,7 +371,7 @@ def book_pt_session(
             """
             SELECT id FROM pt_bookings
             WHERE user_id = %s AND booking_date = %s
-            AND status IN ('booked', 'completed')
+            AND status IN ('booked', 'attended')
             AND (
                 (start_time <= %s AND end_time > %s)
                 OR (start_time < %s AND end_time >= %s)
@@ -469,21 +469,30 @@ def book_pt_session(
 
 
 @router.delete("/book/{booking_id}")
-def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
-    """Cancel a PT booking"""
+def cancel_pt_booking(
+    booking_id: int,
+    branch_id: Optional[int] = Depends(get_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Cancel a PT booking (CMS/Trainer)"""
+    check_permission(auth, "trainer.update")
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        user_id = auth["user_id"]
-
         # Get booking
+        where_branch = " AND branch_id = %s" if branch_id else ""
+        params = [booking_id]
+        if branch_id:
+            params.append(branch_id)
         cursor.execute(
-            """
+            f"""
             SELECT * FROM pt_bookings
-            WHERE id = %s AND user_id = %s AND status = 'booked'
+            WHERE id = %s AND status = 'booked'
+            {where_branch}
             """,
-            (booking_id, user_id),
+            tuple(params),
         )
         booking = cursor.fetchone()
 
@@ -731,9 +740,9 @@ def create_pt_package(request: PTPackageCreate, auth: dict = Depends(verify_bear
         conn.close()
 
 
-@router.post("/bookings/{booking_id}/complete")
-def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
-    """Mark PT booking as completed (CMS/Trainer)"""
+@router.post("/bookings/{booking_id}/attend")
+def mark_pt_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Mark PT booking as attended (CMS/Trainer)"""
     check_permission(auth, "trainer.update")
 
     conn = get_db_connection()
@@ -750,14 +759,14 @@ def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_toke
         if not booking:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah diproses"},
             )
 
-        # Update booking
+        # Update booking to attended
         cursor.execute(
             """
             UPDATE pt_bookings
-            SET status = 'completed', completed_at = %s, completed_by = %s, updated_at = %s
+            SET status = 'attended', attended_at = %s, completed_by = %s, updated_at = %s
             WHERE id = %s
             """,
             (datetime.now(), auth["user_id"], datetime.now(), booking_id),
@@ -789,21 +798,27 @@ def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_toke
 
         return {
             "success": True,
-            "message": "Sesi PT berhasil diselesaikan",
+            "message": "Kehadiran PT berhasil dicatat",
         }
 
     except HTTPException:
         raise
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error completing PT booking: {e}", exc_info=True)
+        logger.error(f"Error marking PT attendance: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error_code": "COMPLETE_PT_FAILED", "message": str(e)},
+            detail={"error_code": "MARK_PT_ATTENDANCE_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()
         conn.close()
+
+
+@router.post("/bookings/{booking_id}/complete")
+def complete_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Alias for attend endpoint - Mark PT booking as attended (CMS/Trainer)"""
+    return mark_pt_attendance(booking_id, auth)
 
 
 @router.post("/bookings/{booking_id}/no-show")
@@ -957,7 +972,7 @@ def book_pt_for_member(
             """
             SELECT id FROM pt_bookings
             WHERE trainer_id = %s AND booking_date = %s
-            AND status IN ('booked', 'completed')
+            AND status IN ('booked', 'attended')
             AND (
                 (start_time <= %s AND end_time > %s)
                 OR (start_time < %s AND end_time >= %s)
@@ -982,7 +997,7 @@ def book_pt_for_member(
             """
             SELECT id FROM pt_bookings
             WHERE user_id = %s AND booking_date = %s
-            AND status IN ('booked', 'completed')
+            AND status IN ('booked', 'attended')
             AND (
                 (start_time <= %s AND end_time > %s)
                 OR (start_time < %s AND end_time >= %s)
@@ -1110,7 +1125,7 @@ def get_pt_bookings_calendar(
             SELECT pb.booking_date,
                    COUNT(*) as total_bookings,
                    SUM(CASE WHEN pb.status = 'booked' THEN 1 ELSE 0 END) as booked_count,
-                   SUM(CASE WHEN pb.status = 'completed' THEN 1 ELSE 0 END) as completed_count
+                   SUM(CASE WHEN pb.status = 'attended' THEN 1 ELSE 0 END) as attended_count
             FROM pt_bookings pb
             WHERE pb.booking_date BETWEEN %s AND %s
             AND pb.status != 'cancelled'
@@ -1198,7 +1213,7 @@ def get_pt_bookings_by_date(
         cursor.execute(
             f"""
             SELECT pb.id, pb.booking_date, pb.start_time, pb.end_time,
-                   pb.status, pb.notes, pb.completed_at,
+                   pb.status, pb.notes, pb.attended_at,
                    u_member.name as member_name, u_member.email as member_email,
                    u_member.phone as member_phone,
                    u_trainer.name as trainer_name,
@@ -1225,8 +1240,8 @@ def get_pt_bookings_by_date(
             b["booking_date"] = str(b["booking_date"])
             b["start_time"] = str(b["start_time"])
             b["end_time"] = str(b["end_time"])
-            if b.get("completed_at"):
-                b["completed_at"] = str(b["completed_at"])
+            if b.get("attended_at"):
+                b["attended_at"] = str(b["attended_at"])
 
         return {
             "success": True,

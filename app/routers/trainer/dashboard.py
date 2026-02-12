@@ -41,35 +41,45 @@ def get_dashboard_summary(
         today = date.today()
 
         # Today's PT bookings
-        pt_today_sql = """
-            SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
-                   COUNT(CASE WHEN pb.status = 'completed' THEN 1 END) as completed
-            FROM pt_bookings pb
-            WHERE pb.trainer_id = %s AND pb.booking_date = %s
-        """
+        pt_today_where = "pb.trainer_id = %s AND pb.booking_date = %s"
         pt_today_params = [trainer_id, today]
         if branch_id:
-            pt_today_sql += " AND pb.branch_id = %s"
+            pt_today_where += " AND pb.branch_id = %s"
             pt_today_params.append(branch_id)
-        cursor.execute(pt_today_sql, pt_today_params)
+        pt_today_where += " AND pb.status IN ('booked', 'attended', 'no_show')"
+
+        cursor.execute(
+            f"""
+            SELECT COUNT(*) as total,
+                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
+                   COUNT(CASE WHEN pb.status = 'attended' THEN 1 END) as completed
+            FROM pt_bookings pb
+            WHERE {pt_today_where}
+            """,
+            pt_today_params,
+        )
         pt_today = cursor.fetchone()
 
         # This week's PT bookings
         week_start = today - timedelta(days=today.weekday())
         week_end = week_start + timedelta(days=6)
-        pt_week_sql = """
-            SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
-                   COUNT(CASE WHEN pb.status = 'completed' THEN 1 END) as completed
-            FROM pt_bookings pb
-            WHERE pb.trainer_id = %s AND pb.booking_date BETWEEN %s AND %s
-        """
+        pt_week_where = "pb.trainer_id = %s AND pb.booking_date BETWEEN %s AND %s"
         pt_week_params = [trainer_id, week_start, week_end]
         if branch_id:
-            pt_week_sql += " AND pb.branch_id = %s"
+            pt_week_where += " AND pb.branch_id = %s"
             pt_week_params.append(branch_id)
-        cursor.execute(pt_week_sql, pt_week_params)
+        pt_week_where += " AND pb.status IN ('booked', 'attended', 'no_show')"
+
+        cursor.execute(
+            f"""
+            SELECT COUNT(*) as total,
+                   COUNT(CASE WHEN pb.status = 'booked' THEN 1 END) as upcoming,
+                   COUNT(CASE WHEN pb.status = 'attended' THEN 1 END) as completed
+            FROM pt_bookings pb
+            WHERE {pt_week_where}
+            """,
+            pt_week_params,
+        )
         pt_week = cursor.fetchone()
 
         # Today's class schedules
@@ -281,7 +291,7 @@ def get_class_attendees(
                    u.name as member_name, u.email as member_email, u.phone as member_phone
             FROM class_bookings cb
             JOIN users u ON cb.user_id = u.id
-            WHERE cb.schedule_id = %s AND cb.class_date = %s AND cb.status IN ('booked', 'attended')
+            WHERE cb.schedule_id = %s AND cb.class_date = %s AND cb.status IN ('booked', 'attended', 'no_show')
             ORDER BY cb.booked_at ASC
             """,
             (schedule_id, class_date),
@@ -301,6 +311,426 @@ def get_class_attendees(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "GET_ATTENDEES_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/statistics")
+def get_trainer_statistics(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get trainer performance statistics for a date range"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        if not date_to:
+            date_to = date.today()
+        if not date_from:
+            date_from = date_to - timedelta(days=29)
+
+        # PT booking summary
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) as total_pt_sessions,
+                COUNT(CASE WHEN status = 'attended' THEN 1 END) as attended,
+                COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_show,
+                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
+                COUNT(CASE WHEN status = 'booked' THEN 1 END) as booked
+            FROM pt_bookings
+            WHERE trainer_id = %s AND booking_date BETWEEN %s AND %s
+            """,
+            (trainer_id, date_from, date_to),
+        )
+        pt_summary = cursor.fetchone()
+
+        done = pt_summary["attended"] + pt_summary["no_show"]
+        attendance_rate = round((pt_summary["attended"] / done * 100), 1) if done > 0 else 0
+
+        # Class session stats
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) as total_class_bookings,
+                COUNT(CASE WHEN cb.status = 'attended' THEN 1 END) as class_attended,
+                COUNT(CASE WHEN cb.status = 'no_show' THEN 1 END) as class_no_show
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cs.trainer_id = %s AND cb.class_date BETWEEN %s AND %s
+            """,
+            (trainer_id, date_from, date_to),
+        )
+        class_summary = cursor.fetchone()
+
+        # Count unique class sessions (distinct schedule+date combos)
+        cursor.execute(
+            """
+            SELECT COUNT(DISTINCT CONCAT(cb.schedule_id, '-', cb.class_date)) as total_class_sessions
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            WHERE cs.trainer_id = %s AND cb.class_date BETWEEN %s AND %s
+                AND cb.status IN ('booked', 'attended', 'no_show')
+            """,
+            (trainer_id, date_from, date_to),
+        )
+        total_class_sessions = cursor.fetchone()["total_class_sessions"]
+
+        # Commission info
+        cursor.execute(
+            "SELECT rate_per_session, commission_percentage FROM trainers WHERE id = %s",
+            (trainer_id,),
+        )
+        trainer_info = cursor.fetchone()
+        rate = float(trainer_info["rate_per_session"] or 0)
+        commission_pct = float(trainer_info["commission_percentage"] or 0)
+        estimated_earnings = round(rate * pt_summary["attended"] * commission_pct / 100)
+
+        # PT by period (daily breakdown)
+        cursor.execute(
+            """
+            SELECT
+                booking_date as date,
+                COUNT(CASE WHEN status = 'attended' THEN 1 END) as attended,
+                COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_show,
+                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled
+            FROM pt_bookings
+            WHERE trainer_id = %s AND booking_date BETWEEN %s AND %s
+            GROUP BY booking_date
+            ORDER BY booking_date DESC
+            """,
+            (trainer_id, date_from, date_to),
+        )
+        pt_by_period = cursor.fetchall()
+        for row in pt_by_period:
+            row["date"] = str(row["date"])
+
+        # Top clients
+        cursor.execute(
+            """
+            SELECT u.name as member_name,
+                   COUNT(*) as total_sessions,
+                   COUNT(CASE WHEN pb.status = 'attended' THEN 1 END) as attended,
+                   COUNT(CASE WHEN pb.status = 'no_show' THEN 1 END) as no_show
+            FROM pt_bookings pb
+            JOIN users u ON pb.user_id = u.id
+            WHERE pb.trainer_id = %s AND pb.booking_date BETWEEN %s AND %s
+                AND pb.status IN ('attended', 'no_show', 'booked')
+            GROUP BY pb.user_id, u.name
+            ORDER BY total_sessions DESC
+            LIMIT 5
+            """,
+            (trainer_id, date_from, date_to),
+        )
+        top_clients = cursor.fetchall()
+
+        return {
+            "success": True,
+            "data": {
+                "summary": {
+                    "total_pt_sessions": pt_summary["total_pt_sessions"],
+                    "attended": pt_summary["attended"],
+                    "no_show": pt_summary["no_show"],
+                    "cancelled": pt_summary["cancelled"],
+                    "booked": pt_summary["booked"],
+                    "attendance_rate": attendance_rate,
+                    "total_class_sessions": total_class_sessions,
+                    "class_attended": class_summary["class_attended"],
+                    "class_no_show": class_summary["class_no_show"],
+                },
+                "commission": {
+                    "rate_per_session": rate,
+                    "commission_percentage": commission_pct,
+                    "estimated_earnings": estimated_earnings,
+                },
+                "pt_by_period": pt_by_period,
+                "top_clients": top_clients,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting trainer statistics: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_STATISTICS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/class-bookings/{booking_id}/attend")
+def mark_class_attended(
+    booking_id: int,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Mark a class booking as attended"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        # Get booking and verify it belongs to this trainer's class
+        cursor.execute(
+            """
+            SELECT cb.id, cb.status, u.name as member_name, cs.trainer_id
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN users u ON cb.user_id = u.id
+            WHERE cb.id = %s AND cb.status = 'booked'
+            """,
+            (booking_id,),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        if booking["trainer_id"] != trainer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "NOT_YOUR_CLASS", "message": "Kelas ini bukan milik Anda"},
+            )
+
+        # Update to attended
+        cursor.execute(
+            """
+            UPDATE class_bookings
+            SET status = 'attended', attended_at = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), datetime.now(), booking_id),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"{booking['member_name']} berhasil ditandai hadir",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error marking class attended: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "MARK_ATTENDED_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/class-bookings/{booking_id}/no-show")
+def mark_class_no_show(
+    booking_id: int,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Mark a class booking as no-show"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        # Get booking and verify it belongs to this trainer's class
+        cursor.execute(
+            """
+            SELECT cb.id, cb.status, u.name as member_name, cs.trainer_id
+            FROM class_bookings cb
+            JOIN class_schedules cs ON cb.schedule_id = cs.id
+            JOIN users u ON cb.user_id = u.id
+            WHERE cb.id = %s AND cb.status = 'booked'
+            """,
+            (booking_id,),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        if booking["trainer_id"] != trainer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "NOT_YOUR_CLASS", "message": "Kelas ini bukan milik Anda"},
+            )
+
+        # Update to no_show
+        cursor.execute(
+            """
+            UPDATE class_bookings
+            SET status = 'no_show', updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), booking_id),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"{booking['member_name']} ditandai tidak hadir",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error marking class no-show: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "MARK_NO_SHOW_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/pt-bookings/{booking_id}/attend")
+def mark_pt_attended(
+    booking_id: int,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Mark a PT booking as attended"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        # Get booking and verify it belongs to this trainer
+        cursor.execute(
+            """
+            SELECT pb.id, pb.status, u.name as member_name, pb.trainer_id
+            FROM pt_bookings pb
+            JOIN users u ON pb.user_id = u.id
+            WHERE pb.id = %s AND pb.status = 'booked'
+            """,
+            (booking_id,),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        if booking["trainer_id"] != trainer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "NOT_YOUR_BOOKING", "message": "Booking ini bukan milik Anda"},
+            )
+
+        # Update to attended
+        cursor.execute(
+            """
+            UPDATE pt_bookings
+            SET status = 'attended', attended_at = %s, completed_by = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), auth["user_id"], datetime.now(), booking_id),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"{booking['member_name']} berhasil ditandai hadir",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error marking PT attended: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "MARK_PT_ATTENDED_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/pt-bookings/{booking_id}/no-show")
+def mark_pt_no_show(
+    booking_id: int,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Mark a PT booking as no-show"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        # Get booking and verify it belongs to this trainer
+        cursor.execute(
+            """
+            SELECT pb.id, pb.status, u.name as member_name, pb.trainer_id
+            FROM pt_bookings pb
+            JOIN users u ON pb.user_id = u.id
+            WHERE pb.id = %s AND pb.status = 'booked'
+            """,
+            (booking_id,),
+        )
+        booking = cursor.fetchone()
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
+            )
+
+        if booking["trainer_id"] != trainer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "NOT_YOUR_BOOKING", "message": "Booking ini bukan milik Anda"},
+            )
+
+        # Update to no_show
+        cursor.execute(
+            """
+            UPDATE pt_bookings
+            SET status = 'no_show', updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), booking_id),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"{booking['member_name']} ditandai tidak hadir",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error marking PT no-show: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "MARK_PT_NO_SHOW_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

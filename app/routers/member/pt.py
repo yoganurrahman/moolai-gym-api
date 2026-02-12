@@ -194,7 +194,7 @@ def get_available_trainers(
             JOIN users u ON t.user_id = u.id
             LEFT JOIN pt_bookings pb
                    ON pb.trainer_id = t.id
-                   AND pb.status IN ('booked', 'completed')
+                   AND pb.status IN ('booked', 'attended')
             WHERE {where_clause}
             GROUP BY t.id, t.specialization, t.bio, t.certifications, u.name, u.email, u.phone, u.avatar
             ORDER BY {order_by}
@@ -253,7 +253,7 @@ def get_trainer_availability(
             )
 
         # Get booked slots
-        booked_where = "trainer_id = %s AND booking_date BETWEEN %s AND %s AND status IN ('booked', 'completed')"
+        booked_where = "trainer_id = %s AND booking_date BETWEEN %s AND %s AND status IN ('booked', 'attended')"
         booked_params = [trainer_id, date_from, date_to]
 
         if branch_id:
@@ -590,15 +590,22 @@ def cancel_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token)
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan"},
             )
 
-        # Check cancel window (24 hours before)
+        # Check cancel window
+        cursor.execute("SELECT value FROM settings WHERE `key` = 'pt_cancel_hours'")
+        setting = cursor.fetchone()
+        cancel_hours = int(setting["value"]) if setting else 24
+
         start_time = booking["start_time"]
         if isinstance(start_time, timedelta):
             start_time = (datetime.min + start_time).time()
         booking_datetime = datetime.combine(booking["booking_date"], start_time)
-        if datetime.now() > booking_datetime - timedelta(hours=24):
+        if datetime.now() > booking_datetime - timedelta(hours=cancel_hours):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error_code": "CANCEL_TOO_LATE", "message": "Pembatalan harus dilakukan minimal 24 jam sebelumnya"},
+                detail={
+                    "error_code": "CANCEL_TOO_LATE",
+                    "message": f"Pembatalan harus dilakukan minimal {cancel_hours} jam sebelum sesi PT",
+                },
             )
 
         # Cancel booking

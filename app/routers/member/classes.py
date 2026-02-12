@@ -619,7 +619,7 @@ def book_class(request: BookClassRequest, auth: dict = Depends(verify_bearer_tok
             """
             SELECT pb.id, pb.start_time, pb.end_time
             FROM pt_bookings pb
-            WHERE pb.user_id = %s AND pb.booking_date = %s AND pb.status IN ('booked', 'completed')
+            WHERE pb.user_id = %s AND pb.booking_date = %s AND pb.status IN ('booked', 'attended')
               AND pb.start_time < %s AND pb.end_time > %s
             """,
             (user_id, request.class_date, new_end, new_start),

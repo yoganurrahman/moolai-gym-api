@@ -162,7 +162,7 @@ def get_today_pt_bookings(
             JOIN member_pt_sessions mps ON pb.member_pt_session_id = mps.id
             JOIN pt_packages pp ON mps.pt_package_id = pp.id
             LEFT JOIN branches br ON pb.branch_id = br.id
-            WHERE pb.trainer_id = %s AND pb.booking_date = %s
+            WHERE pb.trainer_id = %s AND pb.booking_date = %s AND pb.status IN ('booked', 'attended', 'no_show')
             {branch_filter}
             ORDER BY pb.start_time ASC
             """,
@@ -199,7 +199,7 @@ def complete_pt_session(
     request: CompleteSessionRequest = None,
     auth: dict = Depends(verify_bearer_token),
 ):
-    """Mark a PT booking as completed"""
+    """Mark a PT booking as attended"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -224,29 +224,19 @@ def complete_pt_session(
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau bukan milik Anda"},
             )
 
-        # Update booking to completed
+        # Update booking to attended
         notes = request.notes if request else None
         cursor.execute(
             """
             UPDATE pt_bookings
-            SET status = 'completed', completed_at = %s, completed_by = %s,
+            SET status = 'attended', attended_at = %s, completed_by = %s,
                 notes = COALESCE(%s, notes), updated_at = %s
             WHERE id = %s
             """,
             (datetime.now(), auth["user_id"], notes, datetime.now(), booking_id),
         )
 
-        # Update used sessions
-        cursor.execute(
-            """
-            UPDATE member_pt_sessions
-            SET used_sessions = used_sessions + 1, updated_at = %s
-            WHERE id = %s
-            """,
-            (datetime.now(), booking["member_pt_session_id"]),
-        )
-
-        # Check if all sessions used
+        # Check if all sessions used (quota already deducted at booking time)
         cursor.execute(
             "SELECT remaining_sessions FROM member_pt_sessions WHERE id = %s",
             (booking["member_pt_session_id"],),
@@ -311,7 +301,7 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
                 detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau bukan milik Anda"},
             )
 
-        # Mark as no-show (session is consumed, not refunded)
+        # Mark as no-show (session already consumed at booking time, not refunded)
         cursor.execute(
             """
             UPDATE pt_bookings
@@ -321,17 +311,7 @@ def mark_no_show(booking_id: int, auth: dict = Depends(verify_bearer_token)):
             (datetime.now(), booking_id),
         )
 
-        # Deduct session (no-show still counts)
-        cursor.execute(
-            """
-            UPDATE member_pt_sessions
-            SET used_sessions = used_sessions + 1, updated_at = %s
-            WHERE id = %s
-            """,
-            (datetime.now(), booking["member_pt_session_id"]),
-        )
-
-        # Check if all sessions used
+        # Check if all sessions used (quota already deducted at booking time)
         cursor.execute(
             "SELECT remaining_sessions FROM member_pt_sessions WHERE id = %s",
             (booking["member_pt_session_id"],),
