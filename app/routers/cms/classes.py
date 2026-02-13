@@ -8,6 +8,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 
+from pymysql.err import IntegrityError
+
 from app.db import get_db_connection
 from app.middleware import verify_bearer_token, check_permission, get_branch_id, require_branch_id
 
@@ -17,6 +19,24 @@ router = APIRouter(prefix="/classes", tags=["CMS - Classes"])
 
 
 # ============== Request Models ==============
+
+class ClassPackageCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    class_count: int = Field(..., ge=1)
+    price: float = Field(..., gt=0)
+    valid_days: int = Field(30, ge=1)
+    class_type_id: Optional[int] = None
+
+
+class ClassPackageUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    class_count: Optional[int] = Field(None, ge=1)
+    price: Optional[float] = Field(None, gt=0)
+    valid_days: Optional[int] = Field(None, ge=1)
+    class_type_id: Optional[int] = None
+
 
 class ClassTypeCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -328,7 +348,7 @@ def get_all_schedules(
     class_type_id: Optional[int] = Query(None),
     trainer_id: Optional[int] = Query(None),
     day_of_week: Optional[int] = Query(None, ge=0, le=6),
-    is_active: Optional[bool] = Query(None),
+    is_active: Optional[bool] = Query(True, description="Filter by active status (default: active only)"),
     branch_id: Optional[int] = Depends(get_branch_id),
     auth: dict = Depends(verify_bearer_token),
 ):
@@ -459,6 +479,20 @@ def create_schedule(
 
     except HTTPException:
         raise
+    except IntegrityError as e:
+        conn.rollback()
+        if "Duplicate entry" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "DUPLICATE_SCHEDULE",
+                    "message": "Jadwal dengan kombinasi ini sudah ada",
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "CREATE_SCHEDULE_FAILED", "message": str(e)},
+        )
     except Exception as e:
         conn.rollback()
         logger.error(f"Error creating schedule: {e}", exc_info=True)
@@ -545,6 +579,20 @@ def update_schedule(
 
     except HTTPException:
         raise
+    except IntegrityError as e:
+        conn.rollback()
+        if "Duplicate entry" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "DUPLICATE_SCHEDULE",
+                    "message": "Jadwal dengan kombinasi ini sudah ada",
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "UPDATE_SCHEDULE_FAILED", "message": str(e)},
+        )
     except Exception as e:
         conn.rollback()
         logger.error(f"Error updating schedule: {e}", exc_info=True)
@@ -1251,6 +1299,9 @@ def get_class_packages(
         )
         packages = cursor.fetchall()
 
+        for pkg in packages:
+            pkg["price"] = float(pkg["price"]) if pkg.get("price") else 0
+
         return {
             "success": True,
             "data": packages,
@@ -1260,6 +1311,199 @@ def get_class_packages(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "FETCH_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/packages", status_code=status.HTTP_201_CREATED)
+def create_class_package(
+    request: ClassPackageCreate,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Create a new class package"""
+    check_permission(auth, "class.create")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        if request.class_type_id:
+            cursor.execute("SELECT id FROM class_types WHERE id = %s AND is_active = 1", (request.class_type_id,))
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "CLASS_TYPE_NOT_FOUND", "message": "Tipe kelas tidak ditemukan"},
+                )
+
+        cursor.execute(
+            """
+            INSERT INTO class_packages
+            (name, description, class_count, price, valid_days, class_type_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                request.name,
+                request.description,
+                request.class_count,
+                request.price,
+                request.valid_days,
+                request.class_type_id,
+                datetime.now(),
+            ),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket kelas berhasil dibuat",
+            "data": {"id": cursor.lastrowid},
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating class package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "CREATE_CLASS_PACKAGE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.put("/packages/{package_id}")
+def update_class_package(
+    package_id: int,
+    request: ClassPackageUpdate,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Update a class package"""
+    check_permission(auth, "class.update")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM class_packages WHERE id = %s", (package_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket kelas tidak ditemukan"},
+            )
+
+        update_fields = []
+        params = []
+
+        if request.name is not None:
+            update_fields.append("name = %s")
+            params.append(request.name)
+        if request.description is not None:
+            update_fields.append("description = %s")
+            params.append(request.description)
+        if request.class_count is not None:
+            update_fields.append("class_count = %s")
+            params.append(request.class_count)
+        if request.price is not None:
+            update_fields.append("price = %s")
+            params.append(request.price)
+        if request.valid_days is not None:
+            update_fields.append("valid_days = %s")
+            params.append(request.valid_days)
+        if request.class_type_id is not None:
+            cursor.execute("SELECT id FROM class_types WHERE id = %s AND is_active = 1", (request.class_type_id,))
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "CLASS_TYPE_NOT_FOUND", "message": "Tipe kelas tidak ditemukan"},
+                )
+            update_fields.append("class_type_id = %s")
+            params.append(request.class_type_id)
+
+        if not update_fields:
+            return {"success": True, "message": "Tidak ada perubahan"}
+
+        update_fields.append("updated_at = %s")
+        params.append(datetime.now())
+        params.append(package_id)
+
+        cursor.execute(
+            f"UPDATE class_packages SET {', '.join(update_fields)} WHERE id = %s",
+            params,
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket kelas berhasil diupdate",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating class package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "UPDATE_CLASS_PACKAGE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/packages/{package_id}")
+def delete_class_package(package_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Delete a class package (soft delete)"""
+    check_permission(auth, "class.delete")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM class_packages WHERE id = %s", (package_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket kelas tidak ditemukan"},
+            )
+
+        # Check if package is in use by active passes
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM member_class_passes WHERE class_package_id = %s AND status = 'active'",
+            (package_id,),
+        )
+        if cursor.fetchone()["count"] > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "PACKAGE_IN_USE",
+                    "message": "Paket kelas sedang digunakan oleh member aktif.",
+                },
+            )
+
+        cursor.execute(
+            "UPDATE class_packages SET is_active = 0, updated_at = %s WHERE id = %s",
+            (datetime.now(), package_id),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket kelas berhasil dihapus",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error deleting class package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "DELETE_CLASS_PACKAGE_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

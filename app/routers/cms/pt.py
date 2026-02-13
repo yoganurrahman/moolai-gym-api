@@ -29,6 +29,16 @@ class PTPackageCreate(BaseModel):
     trainer_id: Optional[int] = None
 
 
+class PTPackageUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    session_count: Optional[int] = Field(None, ge=1)
+    session_duration: Optional[int] = Field(None, ge=30, le=180)
+    price: Optional[float] = Field(None, gt=0)
+    valid_days: Optional[int] = Field(None, ge=1)
+    trainer_id: Optional[int] = None
+
+
 class PurchasePTRequest(BaseModel):
     package_id: int
     trainer_id: int
@@ -529,6 +539,17 @@ def cancel_pt_booking(
             """,
             (datetime.now(), datetime.now(), booking_id),
         )
+
+        # Refund session (used_sessions was incremented when booking was created)
+        cursor.execute(
+            """
+            UPDATE member_pt_sessions
+            SET used_sessions = GREATEST(used_sessions - 1, 0), updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), booking["member_pt_session_id"]),
+        )
+
         conn.commit()
 
         return {
@@ -740,6 +761,142 @@ def create_pt_package(request: PTPackageCreate, auth: dict = Depends(verify_bear
         conn.close()
 
 
+@router.put("/packages/{package_id}")
+def update_pt_package(
+    package_id: int, request: PTPackageUpdate, auth: dict = Depends(verify_bearer_token)
+):
+    """Update a PT package (CMS)"""
+    check_permission(auth, "trainer.update")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM pt_packages WHERE id = %s", (package_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket PT tidak ditemukan"},
+            )
+
+        update_fields = []
+        params = []
+
+        if request.name is not None:
+            update_fields.append("name = %s")
+            params.append(request.name)
+        if request.description is not None:
+            update_fields.append("description = %s")
+            params.append(request.description)
+        if request.session_count is not None:
+            update_fields.append("session_count = %s")
+            params.append(request.session_count)
+        if request.session_duration is not None:
+            update_fields.append("session_duration = %s")
+            params.append(request.session_duration)
+        if request.price is not None:
+            update_fields.append("price = %s")
+            params.append(request.price)
+        if request.valid_days is not None:
+            update_fields.append("valid_days = %s")
+            params.append(request.valid_days)
+        if request.trainer_id is not None:
+            cursor.execute("SELECT id FROM trainers WHERE id = %s AND is_active = 1", (request.trainer_id,))
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "TRAINER_NOT_FOUND", "message": "Trainer tidak ditemukan"},
+                )
+            update_fields.append("trainer_id = %s")
+            params.append(request.trainer_id)
+
+        if not update_fields:
+            return {"success": True, "message": "Tidak ada perubahan"}
+
+        update_fields.append("updated_at = %s")
+        params.append(datetime.now())
+        params.append(package_id)
+
+        cursor.execute(
+            f"UPDATE pt_packages SET {', '.join(update_fields)} WHERE id = %s",
+            params,
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket PT berhasil diupdate",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating PT package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "UPDATE_PT_PACKAGE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/packages/{package_id}")
+def delete_pt_package(package_id: int, auth: dict = Depends(verify_bearer_token)):
+    """Delete a PT package (soft delete)"""
+    check_permission(auth, "trainer.delete")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM pt_packages WHERE id = %s", (package_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "PACKAGE_NOT_FOUND", "message": "Paket PT tidak ditemukan"},
+            )
+
+        # Check if package is in use by active sessions
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM member_pt_sessions WHERE pt_package_id = %s AND status = 'active'",
+            (package_id,),
+        )
+        if cursor.fetchone()["count"] > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "PACKAGE_IN_USE",
+                    "message": "Paket PT sedang digunakan oleh member aktif. Nonaktifkan paket saja.",
+                },
+            )
+
+        cursor.execute(
+            "UPDATE pt_packages SET is_active = 0, updated_at = %s WHERE id = %s",
+            (datetime.now(), package_id),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Paket PT berhasil dihapus",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error deleting PT package: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "DELETE_PT_PACKAGE_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/bookings/{booking_id}/attend")
 def mark_pt_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token)):
     """Mark PT booking as attended (CMS/Trainer)"""
@@ -787,17 +944,7 @@ def mark_pt_attendance(booking_id: int, auth: dict = Depends(verify_bearer_token
             (datetime.now(), auth["user_id"], datetime.now(), booking_id),
         )
 
-        # Update used sessions
-        cursor.execute(
-            """
-            UPDATE member_pt_sessions
-            SET used_sessions = used_sessions + 1, updated_at = %s
-            WHERE id = %s
-            """,
-            (datetime.now(), booking["member_pt_session_id"]),
-        )
-
-        # Check if all sessions used
+        # Check if all sessions used (used_sessions already incremented when booking was created)
         cursor.execute(
             "SELECT remaining_sessions FROM member_pt_sessions WHERE id = %s",
             (booking["member_pt_session_id"],),
@@ -881,16 +1028,7 @@ def no_show_pt_booking(booking_id: int, auth: dict = Depends(verify_bearer_token
             (datetime.now(), booking_id),
         )
 
-        # No-show still counts as a used session
-        cursor.execute(
-            """
-            UPDATE member_pt_sessions
-            SET used_sessions = used_sessions + 1, updated_at = %s
-            WHERE id = %s
-            """,
-            (datetime.now(), booking["member_pt_session_id"]),
-        )
-
+        # No-show still counts as a used session (already incremented when booking was created)
         cursor.execute(
             "SELECT remaining_sessions FROM member_pt_sessions WHERE id = %s",
             (booking["member_pt_session_id"],),
@@ -1089,6 +1227,17 @@ def book_pt_for_member(
             ),
         )
         booking_id = cursor.lastrowid
+
+        # Deduct session (same as member booking)
+        cursor.execute(
+            """
+            UPDATE member_pt_sessions
+            SET used_sessions = used_sessions + 1, updated_at = %s
+            WHERE id = %s
+            """,
+            (datetime.now(), pt_session["id"]),
+        )
+
         conn.commit()
 
         return {

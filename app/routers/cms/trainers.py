@@ -3,7 +3,7 @@ Trainers Router - List Trainers
 """
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
@@ -25,6 +25,7 @@ class TrainerCreate(BaseModel):
     experience_years: int = Field(0, ge=0)
     rate_per_session: Optional[float] = Field(None, gt=0)
     commission_percentage: float = Field(0, ge=0, le=100)
+    certifications: Optional[List[str]] = None
 
 
 class TrainerUpdate(BaseModel):
@@ -33,6 +34,7 @@ class TrainerUpdate(BaseModel):
     experience_years: Optional[int] = Field(None, ge=0)
     rate_per_session: Optional[float] = Field(None, gt=0)
     commission_percentage: Optional[float] = Field(None, ge=0, le=100)
+    certifications: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 
@@ -219,11 +221,14 @@ def create_trainer(request: TrainerCreate, auth: dict = Depends(verify_bearer_to
             )
 
         # Create trainer
+        import json
+        certifications_json = json.dumps(request.certifications) if request.certifications else None
+
         cursor.execute(
             """
             INSERT INTO trainers
-            (user_id, specialization, bio, experience_years, rate_per_session, commission_percentage, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (user_id, specialization, bio, experience_years, rate_per_session, commission_percentage, certifications, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.user_id,
@@ -232,6 +237,7 @@ def create_trainer(request: TrainerCreate, auth: dict = Depends(verify_bearer_to
                 request.experience_years,
                 request.rate_per_session,
                 request.commission_percentage,
+                certifications_json,
                 datetime.now(),
             ),
         )
@@ -298,6 +304,11 @@ def update_trainer(
             if value is not None:
                 update_fields.append(f"{field} = %s")
                 params.append(value)
+
+        if request.certifications is not None:
+            import json
+            update_fields.append("certifications = %s")
+            params.append(json.dumps(request.certifications) if request.certifications else None)
 
         if request.is_active is not None:
             update_fields.append("is_active = %s")
