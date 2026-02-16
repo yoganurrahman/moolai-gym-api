@@ -1747,6 +1747,7 @@ INSERT INTO `settings` (`key`, `value`, `type`, `description`) VALUES
 ('service_charge_percentage', '5', 'number', 'Persentase service charge'),
 -- Check-in
 ('checkin_cooldown_minutes', '60', 'number', 'Jeda minimal antar check-in (menit)'),
+('class_checkin_before_minutes', '0', 'number', 'Boleh check-in kelas berapa menit sebelum mulai (0 = sepanjang hari)'),
 -- Booking
 ('class_booking_advance_days', '7', 'number', 'Booking kelas maksimal H-berapa'),
 ('class_cancel_hours', '2', 'number', 'Minimal jam sebelum kelas untuk cancel'),

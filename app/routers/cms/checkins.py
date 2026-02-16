@@ -23,6 +23,9 @@ class ManualCheckinRequest(BaseModel):
     checkin_type: Optional[str] = None  # 'gym' or 'class_only', auto-detected if not provided
     notes: Optional[str] = None
 
+class ScanQRRequest(BaseModel):
+    token: str
+
 
 # ============== Endpoints ==============
 
@@ -550,6 +553,201 @@ def force_checkout(checkin_id: int, auth: dict = Depends(verify_bearer_token)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "FORCE_CHECKOUT_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/scan-qr")
+def scan_qr_checkin(
+    request: ScanQRRequest,
+    auth: dict = Depends(verify_bearer_token),
+    branch_id: int = Depends(require_branch_id),
+):
+    """Scan member QR token to perform check-in (staff action)"""
+    check_permission(auth, "checkin.create")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Look up token
+        cursor.execute(
+            """
+            SELECT cqt.*, u.name as member_name, u.email as member_email
+            FROM checkin_qr_tokens cqt
+            JOIN users u ON cqt.user_id = u.id
+            WHERE cqt.token = %s
+            """,
+            (request.token,),
+        )
+        token_row = cursor.fetchone()
+
+        if not token_row:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_INVALID", "message": "QR code tidak valid"},
+            )
+
+        if token_row["is_used"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_USED", "message": "QR code sudah digunakan"},
+            )
+
+        if token_row["expires_at"] < datetime.now():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_EXPIRED", "message": "QR code sudah expired, minta member generate ulang"},
+            )
+
+        member_user_id = token_row["user_id"]
+        checkin_type = token_row["checkin_type"]
+
+        # Mark token as used
+        cursor.execute(
+            "UPDATE checkin_qr_tokens SET is_used = 1, used_at = %s WHERE id = %s",
+            (datetime.now(), token_row["id"]),
+        )
+
+        # Check if already checked in
+        cursor.execute(
+            "SELECT id FROM member_checkins WHERE user_id = %s AND checkout_time IS NULL",
+            (member_user_id,),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "ALREADY_CHECKED_IN", "message": f"{token_row['member_name']} sudah check-in dan belum checkout"},
+            )
+
+        checkin_membership_id = None
+        checkin_class_pass_id = None
+        membership = None
+        class_pass = None
+        response_data = {
+            "checkin_type": checkin_type,
+            "member_name": token_row["member_name"],
+            "member_email": token_row["member_email"],
+        }
+
+        if checkin_type == "gym":
+            # Get active membership
+            cursor.execute(
+                """
+                SELECT mm.*, mp.name as package_name, mp.package_type
+                FROM member_memberships mm
+                JOIN membership_packages mp ON mm.package_id = mp.id
+                WHERE mm.user_id = %s AND mm.status = 'active'
+                ORDER BY mm.created_at DESC
+                LIMIT 1
+                """,
+                (member_user_id,),
+            )
+            membership = cursor.fetchone()
+
+            if not membership:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NO_ACTIVE_MEMBERSHIP", "message": "Member tidak memiliki membership aktif"},
+                )
+
+            if membership["end_date"] and membership["end_date"] < date.today():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "MEMBERSHIP_EXPIRED", "message": "Membership member sudah expired"},
+                )
+
+            if membership["package_type"] == "visit":
+                if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error_code": "NO_VISITS_LEFT", "message": "Sisa visit member sudah habis"},
+                    )
+
+            checkin_membership_id = membership["id"]
+            response_data["package_name"] = membership["package_name"]
+
+        elif checkin_type == "class_only":
+            booking_id = token_row["booking_id"]
+            if not booking_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NO_BOOKING", "message": "QR token tidak memiliki booking_id"},
+                )
+
+            # Get booking info
+            cursor.execute(
+                """
+                SELECT cb.*, cs.start_time, cs.end_time, ct.name as class_name
+                FROM class_bookings cb
+                JOIN class_schedules cs ON cb.schedule_id = cs.id
+                JOIN class_types ct ON cs.class_type_id = ct.id
+                WHERE cb.id = %s AND cb.user_id = %s AND cb.status = 'booked'
+                """,
+                (booking_id, member_user_id),
+            )
+            booking = cursor.fetchone()
+
+            if not booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah dibatalkan"},
+                )
+
+            checkin_membership_id = booking.get("membership_id")
+            checkin_class_pass_id = booking.get("class_pass_id")
+            response_data["class_name"] = booking["class_name"]
+            response_data["booking_id"] = booking_id
+
+            # Update booking status to attended
+            cursor.execute(
+                "UPDATE class_bookings SET status = 'attended', attended_at = %s, completed_by = %s WHERE id = %s",
+                (datetime.now(), auth["user_id"], booking_id),
+            )
+
+        # Create check-in record
+        cursor.execute(
+            """
+            INSERT INTO member_checkins
+            (branch_id, user_id, checkin_type, membership_id, class_pass_id,
+             checkin_time, checkin_method, checked_in_by, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                branch_id, member_user_id, checkin_type,
+                checkin_membership_id, checkin_class_pass_id,
+                datetime.now(), "qr_code", auth["user_id"], datetime.now(),
+            ),
+        )
+        checkin_id = cursor.lastrowid
+        response_data["checkin_id"] = checkin_id
+
+        # Deduct visit for visit-based membership
+        if checkin_type == "gym" and membership and membership["package_type"] == "visit":
+            cursor.execute(
+                "UPDATE member_memberships SET visit_remaining = visit_remaining - 1, updated_at = %s WHERE id = %s",
+                (datetime.now(), membership["id"]),
+            )
+            response_data["visit_remaining"] = membership["visit_remaining"] - 1
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"Check-in berhasil untuk {token_row['member_name']}",
+            "data": response_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error during QR scan check-in: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "SCAN_QR_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

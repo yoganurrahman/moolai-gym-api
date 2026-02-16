@@ -2,10 +2,12 @@
 Member Check-ins Router - Member check-in/out via QR
 """
 import logging
+import secrets
 from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
+from pydantic import BaseModel
 
 from app.db import get_db_connection
 from app.middleware import verify_bearer_token, require_branch_id
@@ -13,6 +15,15 @@ from app.middleware import verify_bearer_token, require_branch_id
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/checkins", tags=["Member - Check-ins"])
+
+QR_TOKEN_TTL_SECONDS = 60  # QR token expires after 1 minute
+
+
+# ============== Request Models ==============
+
+class GenerateQRRequest(BaseModel):
+    checkin_type: str  # 'gym' or 'class_only'
+    booking_id: Optional[int] = None  # Required if checkin_type == 'class_only'
 
 
 # ============== Endpoints ==============
@@ -211,6 +222,182 @@ def scan_checkin(branch_id: int = Depends(require_branch_id), auth: dict = Depen
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "CHECKIN_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/generate-qr")
+def generate_qr_token(
+    request: GenerateQRRequest,
+    branch_id: int = Depends(require_branch_id),
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Generate a QR token for check-in (expires in 1 minute)"""
+    if request.checkin_type not in ("gym", "class_only"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error_code": "INVALID_CHECKIN_TYPE", "message": "checkin_type harus 'gym' atau 'class_only'"},
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        user_id = auth["user_id"]
+
+        if request.checkin_type == "gym":
+            # Validate active membership
+            cursor.execute(
+                """
+                SELECT mm.*, mp.name as package_name, mp.package_type
+                FROM member_memberships mm
+                JOIN membership_packages mp ON mm.package_id = mp.id
+                WHERE mm.user_id = %s AND mm.status = 'active'
+                ORDER BY mm.created_at DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            membership = cursor.fetchone()
+
+            if not membership:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NO_ACTIVE_MEMBERSHIP", "message": "Anda tidak memiliki membership aktif"},
+                )
+
+            if membership["end_date"] and membership["end_date"] < date.today():
+                cursor.execute(
+                    "UPDATE member_memberships SET status = 'expired', updated_at = %s WHERE id = %s",
+                    (datetime.now(), membership["id"]),
+                )
+                conn.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "MEMBERSHIP_EXPIRED", "message": "Membership Anda sudah expired"},
+                )
+
+            if membership["package_type"] == "visit":
+                if not membership["visit_remaining"] or membership["visit_remaining"] <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error_code": "NO_VISITS_LEFT", "message": "Sisa visit Anda sudah habis"},
+                    )
+
+        elif request.checkin_type == "class_only":
+            # Validate booking
+            if not request.booking_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_REQUIRED", "message": "booking_id wajib untuk check-in kelas"},
+                )
+
+            cursor.execute(
+                """
+                SELECT cb.*, cs.start_time, ct.name as class_name
+                FROM class_bookings cb
+                JOIN class_schedules cs ON cb.schedule_id = cs.id
+                JOIN class_types ct ON cs.class_type_id = ct.id
+                WHERE cb.id = %s AND cb.user_id = %s AND cb.status = 'booked'
+                """,
+                (request.booking_id, user_id),
+            )
+            booking = cursor.fetchone()
+
+            if not booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah dibatalkan"},
+                )
+
+            # Check class_date is today
+            if booking["class_date"] != date.today():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NOT_TODAY", "message": "Check-in hanya bisa dilakukan pada hari kelas"},
+                )
+
+            # Check time restriction from settings
+            cursor.execute(
+                "SELECT `value` FROM settings WHERE `key` = 'class_checkin_before_minutes'"
+            )
+            setting_row = cursor.fetchone()
+            before_minutes = int(setting_row["value"]) if setting_row else 0
+
+            if before_minutes > 0:
+                now = datetime.now()
+                start_time = booking["start_time"]
+                if isinstance(start_time, timedelta):
+                    total_seconds = int(start_time.total_seconds())
+                    start_hour = total_seconds // 3600
+                    start_minute = (total_seconds % 3600) // 60
+                else:
+                    start_hour = start_time.hour
+                    start_minute = start_time.minute
+
+                class_start = datetime(now.year, now.month, now.day, start_hour, start_minute)
+                earliest_checkin = class_start - timedelta(minutes=before_minutes)
+
+                if now < earliest_checkin:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "TOO_EARLY",
+                            "message": f"Check-in bisa dilakukan mulai {before_minutes} menit sebelum kelas ({start_hour:02d}:{start_minute:02d})",
+                        },
+                    )
+            # else: 0 = check-in allowed anytime on class day
+
+        # Check if already checked in
+        cursor.execute(
+            "SELECT id FROM member_checkins WHERE user_id = %s AND checkout_time IS NULL",
+            (user_id,),
+        )
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "ALREADY_CHECKED_IN", "message": "Anda sudah check-in. Silakan check-out terlebih dahulu."},
+            )
+
+        # Invalidate existing unused tokens for this user
+        cursor.execute(
+            "UPDATE checkin_qr_tokens SET is_used = 1 WHERE user_id = %s AND is_used = 0",
+            (user_id,),
+        )
+
+        # Generate new token
+        token = secrets.token_hex(16)
+        expires_at = datetime.now() + timedelta(seconds=QR_TOKEN_TTL_SECONDS)
+
+        cursor.execute(
+            """
+            INSERT INTO checkin_qr_tokens (user_id, token, checkin_type, booking_id, branch_id, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (user_id, token, request.checkin_type, request.booking_id, branch_id, expires_at),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "data": {
+                "token": token,
+                "checkin_type": request.checkin_type,
+                "expires_at": expires_at.isoformat(),
+                "ttl_seconds": QR_TOKEN_TTL_SECONDS,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error generating QR token: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GENERATE_QR_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()

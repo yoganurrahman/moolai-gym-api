@@ -46,3 +46,36 @@ def get_tax_settings(auth: dict = Depends(verify_bearer_token)):
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/checkin")
+def get_checkin_settings(auth: dict = Depends(verify_bearer_token)):
+    """Get check-in related settings for member app"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            "SELECT `key`, `value` FROM settings WHERE `key` IN "
+            "('checkin_cooldown_minutes', 'class_checkin_before_minutes')"
+        )
+        rows = cursor.fetchall()
+        settings = {row["key"]: row["value"] for row in rows}
+
+        return {
+            "success": True,
+            "data": {
+                "checkin_cooldown_minutes": int(settings.get("checkin_cooldown_minutes", "60")),
+                "class_checkin_before_minutes": int(settings.get("class_checkin_before_minutes", "0")),
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting checkin settings: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_CHECKIN_SETTINGS_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
