@@ -235,10 +235,10 @@ def generate_qr_token(
     auth: dict = Depends(verify_bearer_token),
 ):
     """Generate a QR token for check-in (expires in 1 minute)"""
-    if request.checkin_type not in ("gym", "class_only"):
+    if request.checkin_type not in ("gym", "class_only", "pt"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error_code": "INVALID_CHECKIN_TYPE", "message": "checkin_type harus 'gym' atau 'class_only'"},
+            detail={"error_code": "INVALID_CHECKIN_TYPE", "message": "checkin_type harus 'gym', 'class_only', atau 'pt'"},
         )
 
     conn = get_db_connection()
@@ -349,6 +349,68 @@ def generate_qr_token(
                         },
                     )
             # else: 0 = check-in allowed anytime on class day
+
+        elif request.checkin_type == "pt":
+            # Validate PT booking
+            if not request.booking_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_REQUIRED", "message": "booking_id wajib untuk check-in PT"},
+                )
+
+            cursor.execute(
+                """
+                SELECT pb.*, u.name as trainer_name
+                FROM pt_bookings pb
+                JOIN users u ON pb.trainer_id = u.id
+                WHERE pb.id = %s AND pb.user_id = %s AND pb.status = 'booked'
+                """,
+                (request.booking_id, user_id),
+            )
+            pt_booking = cursor.fetchone()
+
+            if not pt_booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking PT tidak ditemukan atau sudah dibatalkan"},
+                )
+
+            # Check booking_date is today
+            if pt_booking["booking_date"] != date.today():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NOT_TODAY", "message": "Check-in hanya bisa dilakukan pada hari booking PT"},
+                )
+
+            # Check time restriction from settings
+            cursor.execute(
+                "SELECT `value` FROM settings WHERE `key` = 'pt_checkin_before_minutes'"
+            )
+            setting_row = cursor.fetchone()
+            before_minutes = int(setting_row["value"]) if setting_row else 0
+
+            if before_minutes > 0:
+                now = datetime.now()
+                start_time = pt_booking["start_time"]
+                if isinstance(start_time, timedelta):
+                    total_seconds = int(start_time.total_seconds())
+                    start_hour = total_seconds // 3600
+                    start_minute = (total_seconds % 3600) // 60
+                else:
+                    start_hour = start_time.hour
+                    start_minute = start_time.minute
+
+                pt_start = datetime(now.year, now.month, now.day, start_hour, start_minute)
+                earliest_checkin = pt_start - timedelta(minutes=before_minutes)
+
+                if now < earliest_checkin:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "TOO_EARLY",
+                            "message": f"Check-in bisa dilakukan mulai {before_minutes} menit sebelum sesi PT ({start_hour:02d}:{start_minute:02d})",
+                        },
+                    )
 
         # Check if already checked in
         cursor.execute(

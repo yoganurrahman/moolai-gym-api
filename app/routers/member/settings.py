@@ -57,7 +57,7 @@ def get_checkin_settings(auth: dict = Depends(verify_bearer_token)):
     try:
         cursor.execute(
             "SELECT `key`, `value` FROM settings WHERE `key` IN "
-            "('checkin_cooldown_minutes', 'class_checkin_before_minutes')"
+            "('checkin_cooldown_minutes', 'class_checkin_before_minutes', 'pt_checkin_before_minutes')"
         )
         rows = cursor.fetchall()
         settings = {row["key"]: row["value"] for row in rows}
@@ -67,6 +67,7 @@ def get_checkin_settings(auth: dict = Depends(verify_bearer_token)):
             "data": {
                 "checkin_cooldown_minutes": int(settings.get("checkin_cooldown_minutes", "60")),
                 "class_checkin_before_minutes": int(settings.get("class_checkin_before_minutes", "0")),
+                "pt_checkin_before_minutes": int(settings.get("pt_checkin_before_minutes", "0")),
             },
         }
 

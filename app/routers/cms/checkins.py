@@ -707,6 +707,54 @@ def scan_qr_checkin(
                 (datetime.now(), auth["user_id"], booking_id),
             )
 
+        elif checkin_type == "pt":
+            booking_id = token_row["booking_id"]
+            if not booking_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "NO_BOOKING", "message": "QR token tidak memiliki booking_id"},
+                )
+
+            # Get PT booking info
+            cursor.execute(
+                """
+                SELECT pb.*, u.name as trainer_name
+                FROM pt_bookings pb
+                JOIN users u ON pb.trainer_id = u.id
+                WHERE pb.id = %s AND pb.user_id = %s AND pb.status = 'booked'
+                """,
+                (booking_id, member_user_id),
+            )
+            pt_booking = cursor.fetchone()
+
+            if not pt_booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking PT tidak ditemukan atau sudah dibatalkan"},
+                )
+
+            response_data["trainer_name"] = pt_booking["trainer_name"]
+            response_data["booking_id"] = booking_id
+
+            # Update PT booking status to attended
+            cursor.execute(
+                "UPDATE pt_bookings SET status = 'attended', updated_at = %s WHERE id = %s",
+                (datetime.now(), booking_id),
+            )
+
+            # Deduct PT session
+            if pt_booking.get("member_pt_session_id"):
+                cursor.execute(
+                    """
+                    UPDATE member_pt_sessions
+                    SET used_sessions = used_sessions + 1,
+                        remaining_sessions = remaining_sessions - 1,
+                        updated_at = %s
+                    WHERE id = %s AND remaining_sessions > 0
+                    """,
+                    (datetime.now(), pt_booking["member_pt_session_id"]),
+                )
+
         # Create check-in record
         cursor.execute(
             """

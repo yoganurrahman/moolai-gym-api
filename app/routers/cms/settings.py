@@ -32,7 +32,7 @@ SETTING_GROUPS = {
     "Informasi Gym": ["gym_name", "gym_address", "gym_phone", "gym_email"],
     "Pajak": ["tax_enabled", "tax_name", "tax_percentage"],
     "Service Charge": ["service_charge_enabled", "service_charge_percentage"],
-    "Check-in": ["checkin_cooldown_minutes", "class_checkin_before_minutes"],
+    "Check-in": ["checkin_cooldown_minutes", "class_checkin_before_minutes", "pt_checkin_before_minutes"],
     "Booking Kelas": ["class_booking_advance_days", "class_cancel_hours"],
     "Booking PT": ["pt_booking_advance_days", "pt_cancel_hours"],
     "Subscription": ["subscription_retry_days", "subscription_retry_count"],

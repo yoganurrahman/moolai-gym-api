@@ -622,7 +622,7 @@ CREATE TABLE `member_checkins` (
   `branch_id` int(11) NOT NULL COMMENT 'Cabang tempat check-in',
   `user_id` int(11) NOT NULL,
   -- Tipe akses
-  `checkin_type` enum('gym','class_only') NOT NULL DEFAULT 'gym' COMMENT 'gym=akses penuh, class_only=hanya area kelas',
+  `checkin_type` enum('gym','class_only','pt') NOT NULL DEFAULT 'gym' COMMENT 'gym=akses penuh, class_only=hanya area kelas, pt=personal training',
   -- Sumber akses (minimal salah satu harus diisi)
   `membership_id` int(11) DEFAULT NULL COMMENT 'Jika pakai membership',
   `class_pass_id` int(11) DEFAULT NULL COMMENT 'Jika HANYA ikut kelas tanpa membership',
@@ -1748,6 +1748,7 @@ INSERT INTO `settings` (`key`, `value`, `type`, `description`) VALUES
 -- Check-in
 ('checkin_cooldown_minutes', '60', 'number', 'Jeda minimal antar check-in (menit)'),
 ('class_checkin_before_minutes', '0', 'number', 'Boleh check-in kelas berapa menit sebelum mulai (0 = sepanjang hari)'),
+('pt_checkin_before_minutes', '0', 'number', 'Boleh check-in PT berapa menit sebelum mulai (0 = sepanjang hari)'),
 -- Booking
 ('class_booking_advance_days', '7', 'number', 'Booking kelas maksimal H-berapa'),
 ('class_cancel_hours', '2', 'number', 'Minimal jam sebelum kelas untuk cancel'),
