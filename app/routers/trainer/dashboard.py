@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
+from pydantic import BaseModel
 
 from app.db import get_db_connection
 from app.middleware import verify_bearer_token, get_branch_id
@@ -748,6 +749,290 @@ def mark_pt_no_show(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "MARK_PT_NO_SHOW_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+class TrainerScanQRRequest(BaseModel):
+    token: str
+
+
+@router.post("/scan-qr")
+def trainer_scan_qr(
+    request: TrainerScanQRRequest,
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Trainer scans member QR to mark attendance for class or PT"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        trainer_id = _get_trainer_id(cursor, auth["user_id"])
+
+        # Look up token
+        cursor.execute(
+            """
+            SELECT cqt.*, u.name as member_name, u.email as member_email
+            FROM checkin_qr_tokens cqt
+            JOIN users u ON cqt.user_id = u.id
+            WHERE cqt.token = %s
+            """,
+            (request.token,),
+        )
+        token_row = cursor.fetchone()
+
+        if not token_row:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_INVALID", "message": "QR code tidak valid"},
+            )
+
+        if token_row["is_used"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_USED", "message": "QR code sudah digunakan"},
+            )
+
+        if token_row["expires_at"] < datetime.now():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "QR_TOKEN_EXPIRED", "message": "QR code sudah expired, minta member generate ulang"},
+            )
+
+        checkin_type = token_row["checkin_type"]
+        booking_id = token_row["booking_id"]
+
+        if checkin_type not in ("class_only", "pt"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "INVALID_TYPE", "message": "QR ini untuk check-in gym, bukan untuk kelas/PT. Gunakan scan di CMS."},
+            )
+
+        if not booking_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "NO_BOOKING", "message": "QR token tidak memiliki booking_id"},
+            )
+
+        # Mark token as used
+        cursor.execute(
+            "UPDATE checkin_qr_tokens SET is_used = 1, used_at = %s WHERE id = %s",
+            (datetime.now(), token_row["id"]),
+        )
+
+        response_data = {
+            "checkin_type": checkin_type,
+            "member_name": token_row["member_name"],
+            "booking_id": booking_id,
+        }
+
+        if checkin_type == "class_only":
+            # Verify booking belongs to trainer's class
+            cursor.execute(
+                """
+                SELECT cb.id, cb.status, cb.schedule_id, cb.class_date,
+                       cs.trainer_id, cs.start_time, cs.end_time,
+                       ct.name as class_name
+                FROM class_bookings cb
+                JOIN class_schedules cs ON cb.schedule_id = cs.id
+                JOIN class_types ct ON cs.class_type_id = ct.id
+                WHERE cb.id = %s AND cb.user_id = %s AND cb.status = 'booked'
+                """,
+                (booking_id, token_row["user_id"]),
+            )
+            booking = cursor.fetchone()
+
+            if not booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking tidak ditemukan atau sudah diproses"},
+                )
+
+            if booking["trainer_id"] != trainer_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error_code": "NOT_YOUR_CLASS", "message": "Booking ini bukan untuk kelas Anda"},
+                )
+
+            # Check timing setting
+            cursor.execute(
+                "SELECT `value` FROM settings WHERE `key` = 'class_checkin_before_minutes'"
+            )
+            setting_row = cursor.fetchone()
+            before_minutes = int(setting_row["value"]) if setting_row else 0
+
+            if before_minutes > 0:
+                now = datetime.now()
+                start_time = booking["start_time"]
+                if hasattr(start_time, "total_seconds"):
+                    total_sec = int(start_time.total_seconds())
+                    start_hour = total_sec // 3600
+                    start_minute = (total_sec % 3600) // 60
+                else:
+                    parts = str(start_time).split(":")
+                    start_hour = int(parts[0])
+                    start_minute = int(parts[1])
+
+                class_date = booking["class_date"]
+                if isinstance(class_date, str):
+                    class_date = datetime.strptime(class_date, "%Y-%m-%d").date()
+                class_start = datetime(class_date.year, class_date.month, class_date.day, start_hour, start_minute)
+                earliest = class_start - timedelta(minutes=before_minutes)
+
+                if now < earliest:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "TOO_EARLY",
+                            "message": f"Scan bisa dilakukan mulai {before_minutes} menit sebelum kelas ({start_hour:02d}:{start_minute:02d})",
+                        },
+                    )
+
+            # Mark attended
+            cursor.execute(
+                "UPDATE class_bookings SET status = 'attended', attended_at = %s, completed_by = %s WHERE id = %s",
+                (datetime.now(), auth["user_id"], booking_id),
+            )
+
+            response_data["class_name"] = booking["class_name"]
+
+        elif checkin_type == "pt":
+            # Verify PT booking belongs to this trainer
+            cursor.execute(
+                """
+                SELECT pb.id, pb.status, pb.trainer_id, pb.booking_date,
+                       pb.start_time, pb.end_time, pb.member_pt_session_id,
+                       u.name as member_name
+                FROM pt_bookings pb
+                JOIN users u ON pb.user_id = u.id
+                WHERE pb.id = %s AND pb.user_id = %s AND pb.status = 'booked'
+                """,
+                (booking_id, token_row["user_id"]),
+            )
+            pt_booking = cursor.fetchone()
+
+            if not pt_booking:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error_code": "BOOKING_NOT_FOUND", "message": "Booking PT tidak ditemukan atau sudah diproses"},
+                )
+
+            if pt_booking["trainer_id"] != trainer_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error_code": "NOT_YOUR_BOOKING", "message": "Booking PT ini bukan milik Anda"},
+                )
+
+            # Check timing setting
+            cursor.execute(
+                "SELECT `value` FROM settings WHERE `key` = 'pt_checkin_before_minutes'"
+            )
+            setting_row = cursor.fetchone()
+            before_minutes = int(setting_row["value"]) if setting_row else 0
+
+            if before_minutes > 0:
+                now = datetime.now()
+                start_time = pt_booking["start_time"]
+                if hasattr(start_time, "total_seconds"):
+                    total_sec = int(start_time.total_seconds())
+                    start_hour = total_sec // 3600
+                    start_minute = (total_sec % 3600) // 60
+                else:
+                    parts = str(start_time).split(":")
+                    start_hour = int(parts[0])
+                    start_minute = int(parts[1])
+
+                booking_date = pt_booking["booking_date"]
+                if isinstance(booking_date, str):
+                    booking_date = datetime.strptime(booking_date, "%Y-%m-%d").date()
+                session_start = datetime(booking_date.year, booking_date.month, booking_date.day, start_hour, start_minute)
+                earliest = session_start - timedelta(minutes=before_minutes)
+
+                if now < earliest:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error_code": "TOO_EARLY",
+                            "message": f"Scan bisa dilakukan mulai {before_minutes} menit sebelum sesi PT ({start_hour:02d}:{start_minute:02d})",
+                        },
+                    )
+
+            # Mark attended
+            cursor.execute(
+                "UPDATE pt_bookings SET status = 'attended', attended_at = %s, completed_by = %s, updated_at = %s WHERE id = %s",
+                (datetime.now(), auth["user_id"], datetime.now(), booking_id),
+            )
+
+            # Deduct PT session
+            if pt_booking.get("member_pt_session_id"):
+                cursor.execute(
+                    """
+                    UPDATE member_pt_sessions
+                    SET used_sessions = used_sessions + 1,
+                        remaining_sessions = remaining_sessions - 1,
+                        updated_at = %s
+                    WHERE id = %s AND remaining_sessions > 0
+                    """,
+                    (datetime.now(), pt_booking["member_pt_session_id"]),
+                )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": f"Kehadiran {token_row['member_name']} berhasil dicatat",
+            "data": response_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error during trainer QR scan: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "SCAN_QR_FAILED", "message": str(e)},
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/checkin-settings")
+def get_checkin_settings(
+    auth: dict = Depends(verify_bearer_token),
+):
+    """Get check-in timing settings for trainer"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        _get_trainer_id(cursor, auth["user_id"])
+
+        cursor.execute(
+            "SELECT `key`, `value` FROM settings WHERE `key` IN "
+            "('class_checkin_before_minutes', 'pt_checkin_before_minutes')"
+        )
+        rows = cursor.fetchall()
+        settings = {row["key"]: row["value"] for row in rows}
+
+        return {
+            "success": True,
+            "data": {
+                "class_checkin_before_minutes": int(settings.get("class_checkin_before_minutes", "0")),
+                "pt_checkin_before_minutes": int(settings.get("pt_checkin_before_minutes", "0")),
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting checkin settings: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "GET_SETTINGS_FAILED", "message": str(e)},
         )
     finally:
         cursor.close()
