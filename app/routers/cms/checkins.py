@@ -770,19 +770,6 @@ def scan_qr_checkin(
                 (datetime.now(), booking_id),
             )
 
-            # Deduct PT session
-            if pt_booking.get("member_pt_session_id"):
-                cursor.execute(
-                    """
-                    UPDATE member_pt_sessions
-                    SET used_sessions = used_sessions + 1,
-                        remaining_sessions = remaining_sessions - 1,
-                        updated_at = %s
-                    WHERE id = %s AND remaining_sessions > 0
-                    """,
-                    (datetime.now(), pt_booking["member_pt_session_id"]),
-                )
-
         # Create check-in record
         cursor.execute(
             """
