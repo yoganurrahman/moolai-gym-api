@@ -804,6 +804,50 @@ def trainer_scan_qr(
         checkin_type = token_row["checkin_type"]
         booking_id = token_row["booking_id"]
 
+        # Mark token as used
+        cursor.execute(
+            "UPDATE checkin_qr_tokens SET is_used = 1, used_at = %s WHERE id = %s",
+            (datetime.now(), token_row["id"]),
+        )
+
+        # Check if already checked in → auto-detect checkout
+        cursor.execute(
+            """
+            SELECT mc.id, mc.checkin_type, mc.checkin_time
+            FROM member_checkins mc
+            WHERE mc.user_id = %s AND mc.checkout_time IS NULL
+            ORDER BY mc.checkin_time DESC LIMIT 1
+            """,
+            (token_row["user_id"],),
+        )
+        active_checkin = cursor.fetchone()
+
+        if active_checkin:
+            # ── CHECKOUT FLOW ──
+            checkout_time = datetime.now()
+            cursor.execute(
+                "UPDATE member_checkins SET checkout_time = %s WHERE id = %s",
+                (checkout_time, active_checkin["id"]),
+            )
+            conn.commit()
+
+            duration_minutes = int((checkout_time - active_checkin["checkin_time"]).total_seconds() / 60)
+
+            return {
+                "success": True,
+                "message": f"Check-out berhasil untuk {token_row['member_name']}",
+                "data": {
+                    "action": "checkout",
+                    "checkin_type": active_checkin["checkin_type"],
+                    "member_name": token_row["member_name"],
+                    "booking_id": booking_id,
+                    "checkin_time": active_checkin["checkin_time"].isoformat(),
+                    "checkout_time": checkout_time.isoformat(),
+                    "duration_minutes": duration_minutes,
+                },
+            }
+
+        # ── CHECKIN FLOW ──
         if checkin_type not in ("class_only", "pt"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -815,12 +859,6 @@ def trainer_scan_qr(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error_code": "NO_BOOKING", "message": "QR token tidak memiliki booking_id"},
             )
-
-        # Mark token as used
-        cursor.execute(
-            "UPDATE checkin_qr_tokens SET is_used = 1, used_at = %s WHERE id = %s",
-            (datetime.now(), token_row["id"]),
-        )
 
         response_data = {
             "checkin_type": checkin_type,
@@ -979,6 +1017,8 @@ def trainer_scan_qr(
                 )
 
         conn.commit()
+
+        response_data["action"] = "checkin"
 
         return {
             "success": True,

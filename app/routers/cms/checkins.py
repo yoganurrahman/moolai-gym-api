@@ -611,17 +611,45 @@ def scan_qr_checkin(
             (datetime.now(), token_row["id"]),
         )
 
-        # Check if already checked in
+        # Check if already checked in → auto-detect checkout
         cursor.execute(
-            "SELECT id FROM member_checkins WHERE user_id = %s AND checkout_time IS NULL",
+            """
+            SELECT mc.id, mc.checkin_type, mc.checkin_time
+            FROM member_checkins mc
+            WHERE mc.user_id = %s AND mc.checkout_time IS NULL
+            ORDER BY mc.checkin_time DESC LIMIT 1
+            """,
             (member_user_id,),
         )
-        if cursor.fetchone():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error_code": "ALREADY_CHECKED_IN", "message": f"{token_row['member_name']} sudah check-in dan belum checkout"},
-            )
+        active_checkin = cursor.fetchone()
 
+        if active_checkin:
+            # ── CHECKOUT FLOW ──
+            checkout_time = datetime.now()
+            cursor.execute(
+                "UPDATE member_checkins SET checkout_time = %s WHERE id = %s",
+                (checkout_time, active_checkin["id"]),
+            )
+            conn.commit()
+
+            duration_minutes = int((checkout_time - active_checkin["checkin_time"]).total_seconds() / 60)
+
+            return {
+                "success": True,
+                "message": f"Check-out berhasil untuk {token_row['member_name']}",
+                "data": {
+                    "action": "checkout",
+                    "checkin_id": active_checkin["id"],
+                    "member_name": token_row["member_name"],
+                    "member_email": token_row["member_email"],
+                    "checkin_type": active_checkin["checkin_type"],
+                    "checkin_time": active_checkin["checkin_time"].isoformat(),
+                    "checkout_time": checkout_time.isoformat(),
+                    "duration_minutes": duration_minutes,
+                },
+            }
+
+        # ── CHECKIN FLOW ──
         checkin_membership_id = None
         checkin_class_pass_id = None
         membership = None
@@ -781,6 +809,8 @@ def scan_qr_checkin(
             response_data["visit_remaining"] = membership["visit_remaining"] - 1
 
         conn.commit()
+
+        response_data["action"] = "checkin"
 
         return {
             "success": True,
