@@ -3,7 +3,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from app.tasks import start_scheduler, stop_scheduler
@@ -59,6 +61,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+VALIDATION_MESSAGES = {
+    "String should have at least 1 character": "Tidak boleh kosong",
+    "Field required": "Wajib diisi",
+    "value is not a valid integer": "Harus berupa angka",
+    "value is not a valid float": "Harus berupa angka",
+    "Value error, value is not a valid email address": "Format email tidak valid",
+    "Input should be a valid integer": "Harus berupa angka",
+    "Input should be a valid number": "Harus berupa angka",
+}
+
+
+def _translate_validation(error):
+    msg = error["msg"]
+    translated = VALIDATION_MESSAGES.get(msg)
+    if translated:
+        return translated
+    # Handle pattern: "String should have at least N characters"
+    if "should have at least" in msg and "character" in msg:
+        return f"Minimal {msg.split('at least ')[1].split(' ')[0]} karakter"
+    if "should be greater than" in msg:
+        return f"Harus lebih dari {msg.split('greater than ')[1]}"
+    if "should be less than" in msg:
+        return f"Harus kurang dari {msg.split('less than ')[1]}"
+    return msg
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    errors = exc.errors()
+    parts = []
+    for e in errors:
+        field = e["loc"][-1] if e.get("loc") else ""
+        translated = _translate_validation(e)
+        parts.append(f"{field}: {translated}" if field and field != "__root__" else translated)
+    message = "; ".join(parts)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": {"error_code": "VALIDATION_ERROR", "message": message}},
+    )
 
 
 @app.get("/")
