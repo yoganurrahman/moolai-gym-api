@@ -25,8 +25,6 @@ class ProductCreate(BaseModel):
     description: Optional[str] = None
     price: float = Field(..., gt=0)
     cost_price: Optional[float] = Field(None, ge=0)
-    stock: int = Field(0, ge=0)
-    min_stock: int = Field(5, ge=0)
     is_rental: bool = False
     rental_duration: Optional[str] = None
     is_active: bool = True
@@ -39,8 +37,6 @@ class ProductUpdate(BaseModel):
     description: Optional[str] = None
     price: Optional[float] = Field(None, gt=0)
     cost_price: Optional[float] = Field(None, ge=0)
-    stock: Optional[int] = Field(None, ge=0)
-    min_stock: Optional[int] = Field(None, ge=0)
     is_rental: Optional[bool] = None
     rental_duration: Optional[str] = None
     is_active: Optional[bool] = None
@@ -222,7 +218,9 @@ def get_products(
                     "bps.stock <= bps.min_stock AND p.is_rental = 0"
                 )
             else:
-                where_clauses.append("p.stock <= p.min_stock AND p.is_rental = 0")
+                where_clauses.append(
+                    "EXISTS (SELECT 1 FROM branch_product_stock bps3 WHERE bps3.product_id = p.id AND bps3.stock <= bps3.min_stock) AND p.is_rental = 0"
+                )
 
         if search:
             where_clauses.append("(p.name LIKE %s OR p.sku LIKE %s)")
@@ -277,8 +275,6 @@ def get_products(
             p["cost_price"] = float(p["cost_price"]) if p.get("cost_price") else 0
             p["is_active"] = bool(p.get("is_active"))
             p["is_rental"] = bool(p.get("is_rental"))
-            p["is_low_stock"] = p["stock"] <= p["min_stock"] if not p["is_rental"] else False
-
             if branch_id:
                 b_stock = p.get("branch_stock")
                 b_min = p.get("branch_min_stock")
@@ -298,6 +294,7 @@ def get_products(
                 # Replace global stock with total from all branches
                 total_b_stock = p.pop("total_branch_stock", 0)
                 p["total_stock"] = int(total_b_stock) if total_b_stock else 0
+                p["is_low_stock"] = False  # low stock only meaningful per-branch
 
         return {
             "success": True,
@@ -344,9 +341,9 @@ def create_product(request: ProductCreate, auth: dict = Depends(verify_bearer_to
         cursor.execute(
             """
             INSERT INTO products
-            (category_id, sku, name, description, price, cost_price, stock, min_stock,
+            (category_id, sku, name, description, price, cost_price,
              is_rental, rental_duration, is_active, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 request.category_id,
@@ -355,8 +352,6 @@ def create_product(request: ProductCreate, auth: dict = Depends(verify_bearer_to
                 request.description,
                 request.price,
                 request.cost_price,
-                request.stock,
-                request.min_stock,
                 1 if request.is_rental else 0,
                 request.rental_duration,
                 1 if request.is_active else 0,
@@ -365,18 +360,6 @@ def create_product(request: ProductCreate, auth: dict = Depends(verify_bearer_to
         )
         conn.commit()
         product_id = cursor.lastrowid
-
-        # Log initial stock
-        if request.stock > 0:
-            cursor.execute(
-                """
-                INSERT INTO product_stock_logs
-                (product_id, type, quantity, stock_before, stock_after, reference_type, notes, created_by, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (product_id, "in", request.stock, 0, request.stock, "adjustment", "Initial stock", auth["user_id"], datetime.now()),
-            )
-            conn.commit()
 
         return {
             "success": True,
@@ -480,7 +463,7 @@ def update_product(
         update_fields = []
         params = []
 
-        for field in ["category_id", "sku", "name", "description", "price", "cost_price", "min_stock", "rental_duration"]:
+        for field in ["category_id", "sku", "name", "description", "price", "cost_price", "rental_duration"]:
             value = getattr(request, field)
             if value is not None:
                 update_fields.append(f"{field} = %s")
@@ -493,30 +476,6 @@ def update_product(
         if request.is_active is not None:
             update_fields.append("is_active = %s")
             params.append(1 if request.is_active else 0)
-
-        # Handle stock change with logging
-        if request.stock is not None and request.stock != product["stock"]:
-            diff = request.stock - product["stock"]
-            cursor.execute(
-                """
-                INSERT INTO product_stock_logs
-                (product_id, type, quantity, stock_before, stock_after, reference_type, notes, created_by, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    product_id,
-                    "in" if diff > 0 else "out",
-                    abs(diff),
-                    product["stock"],
-                    request.stock,
-                    "adjustment",
-                    "Stock update via product edit",
-                    auth["user_id"],
-                    datetime.now(),
-                ),
-            )
-            update_fields.append("stock = %s")
-            params.append(request.stock)
 
         if not update_fields:
             return {"success": True, "message": "Tidak ada perubahan"}
@@ -647,7 +606,7 @@ def adjust_stock(
                 INSERT INTO branch_product_stock (branch_id, product_id, stock, min_stock)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (branch_id, product_id, new_stock, product["min_stock"]),
+                (branch_id, product_id, new_stock, 5),
             )
 
         # Log with branch_id

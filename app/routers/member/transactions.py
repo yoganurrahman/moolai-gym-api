@@ -103,7 +103,7 @@ def get_item_details(cursor, item_type: str, item_id: int, branch_id: int = None
             )
         else:
             cursor.execute(
-                "SELECT id, name, price, stock, is_rental FROM products WHERE id = %s AND is_active = 1",
+                "SELECT id, name, price, 0 AS stock, is_rental FROM products WHERE id = %s AND is_active = 1",
                 (item_id,),
             )
     elif item_type == "pt_package":

@@ -69,7 +69,6 @@ def run_transaction_tests() -> TestResult:
             "sku": f"PRO-{datetime.now().strftime('%H%M%S')}",
             "price": 35000,
             "cost_price": 20000,
-            "stock": 100,
             "category_id": category_id,
             "is_active": True
         })
