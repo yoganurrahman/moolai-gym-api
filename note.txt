@@ -61,3 +61,62 @@ No	Menu	Fitur
 12	Settings	Pajak, Service charge, Payment gateway
 13	Users & Roles	Staff management, Permissions
 14	Reports	Revenue, Members, Attendance, Classes
+
+
+deploy
+
+##Clone
+mkdir ~/projects/moolai-gym-api
+
+cd ~/projects/moolai-gym-api
+git clone https://github.com/yoganurrahman/moolai-gym-api.git .
+
+## port forwarding
+sudo tee /etc/nginx/sites-available/gym.moolai.web.id << 'EOF'
+server {
+    server_name gym.moolai.web.id;
+
+    location / {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+EOF listen 80;
+server {
+    server_name gym.moolai.web.id;
+
+    location / {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    listen 80;
+}
+
+##Start
+sudo ln -s /etc/nginx/sites-available/gym.moolai.web.id /etc/nginx/sites-enabled/
+
+##DNS Record
+Tambahkan DNS record di panel domain Anda (Cloudflare, Niagahoster, dll):
+Type: A
+Name: gym
+Value: (IP server dari langkah 1)
+TTL: Auto
+
+##SSL
+sudo certbot --nginx -d gym.moolai.web.id
+
+##Background Service
+
+pkill -f run.py
+nohup ./venv/bin/python run.py > pos.log 2>&1 &
