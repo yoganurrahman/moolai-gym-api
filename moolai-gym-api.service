@@ -1,0 +1,14 @@
+[Unit]
+Description=Moolai Gym API
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=yogaanurrahman
+WorkingDirectory=/home/yogaanurrahman/projects/moolai-gym-api
+ExecStart=/home/yogaanurrahman/projects/moolai-gym-api/venv/bin/python run.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

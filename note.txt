@@ -85,23 +85,11 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-EOF listen 80;
-server {
-    server_name gym.moolai.web.id;
-
-    location / {
-        proxy_pass http://127.0.0.1:8002;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     listen 80;
 }
+EOF
 
 ##Start
 sudo ln -s /etc/nginx/sites-available/gym.moolai.web.id /etc/nginx/sites-enabled/
@@ -120,3 +108,26 @@ sudo certbot --nginx -d gym.moolai.web.id
 
 pkill -f run.py
 nohup ./venv/bin/python run.py > pos.log 2>&1 &
+
+##auto start
+
+# 1. Copy file service ke systemd
+sudo cp ~/projects/moolai-gym-api/moolai-gym-api.service /etc/systemd/system/
+
+# 2. Reload systemd
+sudo systemctl daemon-reload
+
+# 3. Stop proses nohup yang masih jalan (cari PID-nya dulu)
+pkill -f "python run.py"
+
+# 4. Enable auto-start saat boot & jalankan sekarang
+sudo systemctl enable --now moolai-gym-api
+
+# 5. Cek status
+sudo systemctl status moolai-gym-api
+
+Perintah berguna:
+sudo systemctl status moolai-gym-api    # Cek status
+sudo systemctl restart moolai-gym-api   # Restart API
+sudo systemctl stop moolai-gym-api      # Stop API
+journalctl -u moolai-gym-api -f         # Lihat log realtime
